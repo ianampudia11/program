@@ -5,7 +5,10 @@ import whatsAppTwilioService from './channels/whatsapp-twilio';
 import whatsApp360DialogPartnerService from './channels/whatsapp-360dialog-partner';
 import messengerService from './channels/messenger';
 import instagramService from './channels/instagram';
+import TikTokService from './channels/tiktok';
 import emailService from './channels/email';
+import twilioSmsService from './channels/twilio-sms';
+import webchatService from './channels/webchat';
 import { Message } from '@shared/schema';
 
 export interface ChannelCapabilities {
@@ -89,11 +92,35 @@ class ChannelManager {
           replyFormat: 'mention'
         };
 
+      case 'tiktok':
+        return {
+          supportsReply: true,
+          supportsDelete: false,
+          supportsQuotedMessages: false,
+          replyFormat: 'mention'
+        };
+
       case 'email':
         return {
           supportsReply: true,
           supportsDelete: false,
           supportsQuotedMessages: true,
+          replyFormat: 'threaded'
+        };
+
+      case 'twilio_sms':
+        return {
+          supportsReply: true,
+          supportsDelete: false,
+          supportsQuotedMessages: false,
+          replyFormat: 'threaded'
+        };
+
+      case 'webchat':
+        return {
+          supportsReply: true,
+          supportsDelete: false,
+          supportsQuotedMessages: false,
           replyFormat: 'threaded'
         };
 
@@ -167,18 +194,33 @@ class ChannelManager {
 
       let messageContent = content;
       try {
-        const user = await storage.getUser(userId);
-        if (user) {
-          const nameCandidates = [
-            (user as any).fullName,
-            (user as any).name,
-            [ (user as any).firstName, (user as any).lastName ].filter(Boolean).join(' ').trim(),
-            (user as any).displayName,
-            typeof (user as any).email === 'string' ? (user as any).email.split('@')[0] : undefined
-          ].filter((v: any) => typeof v === 'string' && v.trim().length > 0);
-          const signatureName = nameCandidates[0];
-          if (signatureName) {
-            messageContent = `> *${signatureName}*\n\n${content}`;
+
+        let agentSignatureEnabled = true; // Default to enabled
+
+        if (conversation.companyId) {
+          const agentSignatureSetting = await storage.getCompanySetting(
+            conversation.companyId,
+            'inbox_agent_signature_enabled'
+          );
+          agentSignatureEnabled = agentSignatureSetting?.value !== undefined && agentSignatureSetting?.value !== null
+            ? Boolean(agentSignatureSetting.value)
+            : true;
+        }
+
+        if (agentSignatureEnabled) {
+          const user = await storage.getUser(userId);
+          if (user) {
+            const nameCandidates = [
+              (user as any).fullName,
+              (user as any).name,
+              [ (user as any).firstName, (user as any).lastName ].filter(Boolean).join(' ').trim(),
+              (user as any).displayName,
+              typeof (user as any).email === 'string' ? (user as any).email.split('@')[0] : undefined
+            ].filter((v: any) => typeof v === 'string' && v.trim().length > 0);
+            const signatureName = nameCandidates[0];
+            if (signatureName) {
+              messageContent = `> *${signatureName}*\n\n${content}`;
+            }
           }
         }
       } catch (userError) {
@@ -258,6 +300,18 @@ class ChannelManager {
             companyId
           );
 
+        case 'tiktok':
+          if (conversation.isGroup) {
+            return { success: false, error: 'TikTok does not support group chat replies' };
+          }
+          return await this.sendTikTokReply(
+            conversation.channelId,
+            conversationId,
+            recipient,
+            messageContent,
+            replyOptions
+          );
+
         case 'email':
           if (conversation.isGroup) {
             return { success: false, error: 'Email does not support group chat replies' };
@@ -267,6 +321,33 @@ class ChannelManager {
             userId,
             recipient,
             messageContent,
+            replyOptions
+          );
+
+        case 'twilio_sms':
+          if (conversation.isGroup) {
+            return { success: false, error: 'SMS does not support group chat replies' };
+          }
+          try {
+            const message = await twilioSmsService.sendMessage(
+              conversation.channelId,
+              userId,
+              recipient,
+              content
+            );
+            return { success: true, messageId: message.id?.toString(), data: message };
+          } catch (err: any) {
+            return { success: false, error: err?.message || 'Failed to send SMS reply' };
+          }
+
+        case 'webchat':
+          if (conversation.isGroup) {
+            return { success: false, error: 'WebChat does not support group chat replies' };
+          }
+          return await this.sendWebChatReply(
+            conversation.channelId,
+            recipient,
+            content,
             replyOptions
           );
 
@@ -524,6 +605,37 @@ class ChannelManager {
     }
   }
 
+  private async sendTikTokReply(
+    connectionId: number,
+    conversationId: number,
+    to: string,
+    content: string,
+    replyOptions: ReplyOptions
+  ): Promise<ChannelServiceResult> {
+    try {
+
+      const replyContent = `@${replyOptions.originalSender} ${content}`;
+
+
+      const message = await TikTokService.sendAndSaveMessage(
+        connectionId,
+        conversationId,
+        to,
+        replyContent,
+        'text'
+      );
+
+      return {
+        success: true,
+        messageId: message.id.toString(),
+        data: message
+      };
+    } catch (error: any) {
+      console.error('Error sending TikTok reply:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
   private async sendEmailReply(
     connectionId: number,
     userId: number,
@@ -563,6 +675,20 @@ class ChannelManager {
         messageId: result.id?.toString(),
         data: result
       };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  private async sendWebChatReply(
+    connectionId: number,
+    sessionId: string,
+    content: string,
+    replyOptions: ReplyOptions
+  ): Promise<ChannelServiceResult> {
+    try {
+      const message = await webchatService.sendMessage(connectionId, sessionId, content);
+      return { success: true, messageId: message?.id?.toString(), data: message };
     } catch (error: any) {
       return { success: false, error: error.message };
     }

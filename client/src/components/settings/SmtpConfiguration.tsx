@@ -18,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, AlertCircle, Check, Mail, Key } from "lucide-react";
+import { Loader2, AlertCircle, Check, Mail, Key, Eye, EyeOff } from "lucide-react";
 
 interface SmtpConfig {
   host: string;
@@ -46,7 +46,7 @@ export function SmtpConfiguration() {
   });
   
   const [testEmailAddress, setTestEmailAddress] = useState('');
-  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+  const [storedPassword, setStoredPassword] = useState('');
   const { toast } = useToast();
   
   const { data: smtpData, isLoading } = useQuery<SmtpConfig>({
@@ -56,7 +56,14 @@ export function SmtpConfiguration() {
   
   useEffect(() => {
     if (smtpData) {
-      setSmtpConfig(smtpData);
+      setStoredPassword(smtpData.auth.pass || '');
+      setSmtpConfig({
+        ...smtpData,
+        auth: {
+          ...smtpData.auth,
+          pass: '' // Clear password field for security
+        }
+      });
     }
   }, [smtpData]);
   
@@ -144,7 +151,7 @@ export function SmtpConfiguration() {
       return;
     }
     
-    if (!smtpConfig.auth.user || !smtpConfig.auth.pass) {
+    if (!smtpConfig.auth.user || (!smtpConfig.auth.pass && !storedPassword)) {
       toast({
         title: 'Validation Error',
         description: 'SMTP username and password are required',
@@ -162,7 +169,16 @@ export function SmtpConfiguration() {
       return;
     }
     
-    updateSmtpConfig.mutate(smtpConfig);
+
+    const configToSave = {
+      ...smtpConfig,
+      auth: {
+        ...smtpConfig.auth,
+        pass: smtpConfig.auth.pass || storedPassword
+      }
+    };
+    
+    updateSmtpConfig.mutate(configToSave);
   };
   
   const handleTestEmail = () => {
@@ -175,7 +191,7 @@ export function SmtpConfiguration() {
       return;
     }
     
-    if (!smtpConfig.host || !smtpConfig.auth.user || !smtpConfig.auth.pass || !smtpConfig.senderEmail) {
+    if (!smtpConfig.host || !smtpConfig.auth.user || (!smtpConfig.auth.pass && !storedPassword) || !smtpConfig.senderEmail) {
       toast({
         title: 'Validation Error',
         description: 'Please complete all required SMTP configuration fields first',
@@ -184,7 +200,16 @@ export function SmtpConfiguration() {
       return;
     }
     
-    testSmtpConfig.mutate({ config: smtpConfig, testEmail: testEmailAddress });
+
+    const configToTest = {
+      ...smtpConfig,
+      auth: {
+        ...smtpConfig.auth,
+        pass: smtpConfig.auth.pass || storedPassword
+      }
+    };
+    
+    testSmtpConfig.mutate({ config: configToTest, testEmail: testEmailAddress });
   };
   
   if (isLoading) {
@@ -266,25 +291,17 @@ export function SmtpConfiguration() {
           
           <div className="space-y-2">
             <Label htmlFor="auth.pass">SMTP Password</Label>
-            <div className="relative">
-              <Input
-                id="auth.pass"
-                name="auth.pass"
-                type={isPasswordVisible ? "text" : "password"}
-                value={smtpConfig.auth.pass}
-                onChange={handleInputChange}
-                placeholder="••••••••"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="absolute right-2 top-1/2 transform -translate-y-1/2 btn-brand-primary"
-                onClick={() => setIsPasswordVisible(!isPasswordVisible)}
-              >
-                {isPasswordVisible ? "Hide" : "Show"}
-              </Button>
-            </div>
+            <Input
+              id="auth.pass"
+              name="auth.pass"
+              type="password"
+              value={smtpConfig.auth.pass}
+              onChange={handleInputChange}
+              placeholder={storedPassword ? "Leave empty to keep current password" : "Enter password"}
+            />
+            <p className="text-xs text-gray-500">
+              {storedPassword ? "Password is set. Leave empty to keep it unchanged, or enter new password." : "For Gmail, use an App Password instead of your regular password"}
+            </p>
           </div>
           
           <div className="space-y-2">

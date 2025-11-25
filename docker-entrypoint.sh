@@ -1,6 +1,4 @@
 #!/bin/bash
-# Convert Windows line endings to Unix
-sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh
 set -e
 
 # Wait for PostgreSQL to be ready
@@ -14,6 +12,7 @@ done
 echo "PostgreSQL is up - executing database initialization"
 
 # Check if this is the first run by looking for migration status
+# Use persistent volume to track migrations across container restarts
 MIGRATION_STATUS_FILE="/app/data/.migration_status"
 MIGRATIONS_DIR="/app/migrations"
 

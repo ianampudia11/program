@@ -42,6 +42,7 @@ interface CreateTemplateModalProps {
   isOpen: boolean;
   onClose: () => void;
   onTemplateCreated: (template: any) => void;
+  whatsappChannelType: WhatsAppChannelType;
 }
 
 interface TemplateFormData {
@@ -80,13 +81,13 @@ const WHATSAPP_TEMPLATE_CATEGORY_OPTIONS = [
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
-export function CreateTemplateModal({ isOpen, onClose, onTemplateCreated }: CreateTemplateModalProps) {
+export function CreateTemplateModal({ isOpen, onClose, onTemplateCreated, whatsappChannelType }: CreateTemplateModalProps) {
   const [formData, setFormData] = useState<TemplateFormData>({
     name: '',
     description: '',
     category: 'general',
     content: '',
-    whatsappChannelType: WHATSAPP_CHANNEL_TYPES.UNOFFICIAL,
+    whatsappChannelType: whatsappChannelType,
     whatsappTemplateCategory: '',
     whatsappTemplateId: '',
     whatsappTemplateName: '',
@@ -107,7 +108,7 @@ export function CreateTemplateModal({ isOpen, onClose, onTemplateCreated }: Crea
         description: '',
         category: 'general',
         content: '',
-        whatsappChannelType: WHATSAPP_CHANNEL_TYPES.UNOFFICIAL,
+        whatsappChannelType: whatsappChannelType,
         whatsappTemplateCategory: '',
         whatsappTemplateId: '',
         whatsappTemplateName: '',
@@ -116,7 +117,7 @@ export function CreateTemplateModal({ isOpen, onClose, onTemplateCreated }: Crea
       setMediaFiles([]);
       setUploadProgress({});
     }
-  }, [isOpen]);
+  }, [isOpen, whatsappChannelType]);
 
   const getFileType = (file: File): 'image' | 'video' | 'audio' | 'document' => {
     const type = file.type.toLowerCase();
@@ -360,80 +361,6 @@ export function CreateTemplateModal({ isOpen, onClose, onTemplateCreated }: Crea
               />
             </div>
 
-            {/* WhatsApp-specific fields */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <Label htmlFor="whatsappChannelType">{t('templates.create.whatsapp_channel_type_label', 'WhatsApp Channel Type')}</Label>
-                <Select
-                  value={formData.whatsappChannelType}
-                  onValueChange={(value) => setFormData(prev => ({
-                    ...prev,
-                    whatsappChannelType: value as WhatsAppChannelType,
-
-                    whatsappTemplateCategory: value === WHATSAPP_CHANNEL_TYPES.OFFICIAL
-                      ? WHATSAPP_TEMPLATE_CATEGORIES.UTILITY
-                      : ''
-                  }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={WHATSAPP_CHANNEL_TYPES.OFFICIAL}>
-                      {t('templates.create.official_channel', 'Official WhatsApp Business API')}
-                    </SelectItem>
-                    <SelectItem value={WHATSAPP_CHANNEL_TYPES.UNOFFICIAL}>
-                      {t('templates.create.unofficial_channel', 'Unofficial WhatsApp')}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {formData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL && (
-                <div>
-                  <Label htmlFor="whatsappTemplateCategory">{t('templates.create.whatsapp_template_category_label', 'WhatsApp Template Category')}</Label>
-                  <Select
-                    value={formData.whatsappTemplateCategory}
-                    onValueChange={(value) => setFormData(prev => ({ ...prev, whatsappTemplateCategory: value }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={t('templates.create.select_category', 'Select category')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {WHATSAPP_TEMPLATE_CATEGORY_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-            </div>
-
-            {formData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL && (
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="whatsappTemplateId">{t('templates.create.whatsapp_template_id_label', 'WhatsApp Template ID (Optional)')}</Label>
-                  <Input
-                    id="whatsappTemplateId"
-                    value={formData.whatsappTemplateId}
-                    onChange={(e) => setFormData(prev => ({ ...prev, whatsappTemplateId: e.target.value }))}
-                    placeholder={t('templates.create.whatsapp_template_id_placeholder', 'e.g., welcome_message_v1')}
-                  />
-                </div>
-
-                <div>
-                  <Label htmlFor="whatsappTemplateName">{t('templates.create.whatsapp_template_name_label', 'WhatsApp Template Name (Optional)')}</Label>
-                  <Input
-                    id="whatsappTemplateName"
-                    value={formData.whatsappTemplateName}
-                    onChange={(e) => setFormData(prev => ({ ...prev, whatsappTemplateName: e.target.value }))}
-                    placeholder={t('templates.create.whatsapp_template_name_placeholder', 'e.g., Welcome Message')}
-                  />
-                </div>
-              </div>
-            )}
           </div>
 
           <Separator />

@@ -413,6 +413,28 @@ export async function sendTwilioWhatsAppMediaMessage(
 }
 
 /**
+ * Process a message through the flow executor (extracted for reuse)
+ */
+async function processMessageThroughFlowExecutor(
+  message: any,
+  conversation: any,
+  contact: any,
+  channelConnection: any
+): Promise<void> {
+  try {
+    const flowExecutorModule = await import('../flow-executor');
+    const flowExecutor = flowExecutorModule.default;
+
+    if (contact) {
+      await flowExecutor.processIncomingMessage(message, conversation, contact, channelConnection);
+    }
+  } catch (error) {
+    console.error('Error in flow executor:', error);
+    throw error;
+  }
+}
+
+/**
  * Process incoming Twilio webhook
  */
 export async function processTwilioWebhook(payload: TwilioWebhookPayload): Promise<void> {
@@ -547,7 +569,16 @@ async function processIncomingMessage(payload: TwilioWebhookPayload): Promise<vo
       contact: contact
     });
 
-    
+
+
+
+    try {
+      await processMessageThroughFlowExecutor(savedMessage, conversation, contact, activeConnection);
+    } catch (error) {
+      console.error('Error processing message through flow executor:', error);
+    }
+
+
   } catch (error: any) {
     console.error('Error processing incoming Twilio message:', error);
     throw error;

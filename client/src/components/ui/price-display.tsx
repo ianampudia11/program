@@ -2,6 +2,7 @@ import React from 'react';
 import { cn } from '@/lib/utils';
 import { getPricingInfo, getDiscountDurationText, type PlanDiscount } from '@/utils/pricing';
 import { getPlanBillingPeriod } from '@/utils/plan-duration';
+import { useCurrency } from '@/contexts/currency-context';
 
 interface PriceDisplayProps {
   plan: { price: number | string } & PlanDiscount;
@@ -24,6 +25,7 @@ export function PriceDisplay({
   showSavings = false,
   layout = 'horizontal'
 }: PriceDisplayProps) {
+  const { formatCurrency } = useCurrency();
   const pricing = getPricingInfo(plan);
   
 
@@ -73,7 +75,7 @@ export function PriceDisplay({
     return (
       <div className={cn('flex items-baseline gap-2', className)}>
         <span className={cn(config.currentPrice, 'text-foreground')}>
-          ${safeDiscountedPrice.toFixed(2)}
+          {formatCurrency(safeDiscountedPrice)}
         </span>
         {showPeriod && (
           <span className={cn(config.period, 'text-muted-foreground')}>
@@ -91,7 +93,7 @@ export function PriceDisplay({
         {/* Current discounted price */}
         <div className="flex items-baseline gap-2">
           <span className={cn(config.currentPrice, 'text-green-600')}>
-            ${safeDiscountedPrice.toFixed(2)}
+            {formatCurrency(safeDiscountedPrice)}
           </span>
           {showPeriod && (
             <span className={cn(config.period, 'text-muted-foreground')}>
@@ -103,7 +105,7 @@ export function PriceDisplay({
         {/* Original price with strikethrough */}
         <div className="flex items-center gap-2">
           <span className={cn(config.originalPrice, 'text-muted-foreground')}>
-            ${safeOriginalPrice.toFixed(2)}
+            {formatCurrency(safeOriginalPrice)}
           </span>
           {showDiscountBadge && pricing.discountLabel && (
             <span className={cn(
@@ -118,7 +120,7 @@ export function PriceDisplay({
         {/* Savings information */}
         {showSavings && (
           <div className={cn(config.savings, 'text-green-600 font-medium')}>
-            Save ${safeDiscountAmount.toFixed(2)} ({pricing.discountPercentage}%)
+            Save {formatCurrency(safeDiscountAmount)} ({pricing.discountPercentage}%)
           </div>
         )}
 
@@ -138,10 +140,10 @@ export function PriceDisplay({
       {/* Price line */}
       <div className="flex items-center gap-3">
         <span className={cn(config.currentPrice, 'text-green-600')}>
-          ${safeDiscountedPrice.toFixed(2)}
+          {formatCurrency(safeDiscountedPrice)}
         </span>
         <span className={cn(config.originalPrice, 'text-muted-foreground')}>
-          ${safeOriginalPrice.toFixed(2)}
+          {formatCurrency(safeOriginalPrice)}
         </span>
         {showPeriod && (
           <span className={cn(config.period, 'text-muted-foreground')}>
@@ -163,7 +165,7 @@ export function PriceDisplay({
         
         {showSavings && (
           <span className={cn(config.badge, 'bg-blue-100 text-blue-800 font-medium rounded-full')}>
-            Save ${safeDiscountAmount.toFixed(2)}
+            Save {formatCurrency(safeDiscountAmount)}
           </span>
         )}
 
@@ -185,6 +187,7 @@ export function CompactPriceDisplay({
   plan: { price: number | string } & PlanDiscount;
   className?: string;
 }) {
+  const { formatCurrency } = useCurrency();
   const pricing = getPricingInfo(plan);
 
 
@@ -194,7 +197,7 @@ export function CompactPriceDisplay({
   if (!pricing.hasDiscount) {
     return (
       <span className={cn('font-semibold', className)}>
-        ${safeDiscountedPrice.toFixed(2)}
+        {formatCurrency(safeDiscountedPrice)}
       </span>
     );
   }
@@ -202,10 +205,10 @@ export function CompactPriceDisplay({
   return (
     <div className={cn('flex items-center gap-2', className)}>
       <span className="font-semibold text-green-600">
-        ${safeDiscountedPrice.toFixed(2)}
+        {formatCurrency(safeDiscountedPrice)}
       </span>
       <span className="text-sm text-muted-foreground line-through">
-        ${safeOriginalPrice.toFixed(2)}
+        {formatCurrency(safeOriginalPrice)}
       </span>
       {pricing.discountLabel && (
         <span className="text-xs bg-green-100 text-green-800 px-1.5 py-0.5 rounded">

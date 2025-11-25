@@ -11,6 +11,9 @@ import { N8nNode } from '@/components/flow-builder/N8nNode';
 import { MakeNode } from '@/components/flow-builder/MakeNode';
 import { AIFlowAssistant } from '@/components/flow-builder/AIFlowAssistant';
 import WhatsAppInteractiveButtonsNode from '@/components/flow-builder/WhatsAppInteractiveButtonsNode';
+import WhatsAppInteractiveListNode from '@/components/flow-builder/WhatsAppInteractiveListNode';
+import WhatsAppCTAURLNode from '@/components/flow-builder/WhatsAppCTAURLNode';
+import WhatsAppLocationRequestNode from '@/components/flow-builder/WhatsAppLocationRequestNode';
 import WhatsAppPollNode from '@/components/flow-builder/WhatsAppPollNode';
 
 import { HTTPRequestNode } from '@/components/flow-builder/HTTPRequestNode';
@@ -49,19 +52,23 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   AlertCircle,
   ArrowRightCircle,
+  Bot,
   Brain,
   Calendar as CalendarIcon,
   Clock,
   Copy,
   Database,
+  ExternalLink,
   File,
   FileAudio, FileText, FileVideo,
   Globe,
   Image,
   Languages,
   LayoutGrid,
+  List,
   ListOrdered,
   Loader2,
+  MapPin,
   MessageCircle,
   MessageSquare,
   Network,
@@ -3159,8 +3166,6 @@ function TriggerNode({ data, isConnectable, id }: any) {
 
   const getConditionLabel = (conditionType: string): string => {
     switch (conditionType) {
-      case 'contains': return t('flow_builder.trigger_condition_contains', 'contains');
-      case 'exact': return t('flow_builder.trigger_condition_exactly_matches', 'exactly matches');
       case 'multiple_keywords': return t('flow_builder.trigger_condition_contains_any', 'contains any of');
       case 'regex': return t('flow_builder.trigger_condition_matches_pattern', 'matches pattern');
       case 'media': return t('flow_builder.trigger_condition_has_media', 'has media attachment');
@@ -3170,8 +3175,6 @@ function TriggerNode({ data, isConnectable, id }: any) {
 
   const getConditionPlaceholder = (conditionType: string): string => {
     switch (conditionType) {
-      case 'contains': return t('flow_builder.trigger_placeholder_contains', 'help, support, etc.');
-      case 'exact': return t('flow_builder.trigger_placeholder_exact', 'Hello world');
       case 'multiple_keywords': return t('flow_builder.trigger_placeholder_keywords', 'Enter keywords separated by commas (e.g., help, support, agent)');
       case 'regex': return t('flow_builder.trigger_placeholder_regex', '\\b\\w+\\b');
       default: return '';
@@ -3189,8 +3192,6 @@ function TriggerNode({ data, isConnectable, id }: any) {
   const getConditionTypesForChannels = (channels: string[]) => {
     const baseConditions = [
       { value: 'any', label: t('flow_builder.any_message', 'Any Message') },
-      { value: 'contains', label: t('flow_builder.contains_word', 'Contains Word') },
-      { value: 'exact', label: t('flow_builder.exact_match', 'Exact Match') },
       { value: 'multiple_keywords', label: t('flow_builder.multiple_keywords', 'Multiple Keywords') },
       { value: 'regex', label: t('flow_builder.regex_pattern', 'Regex Pattern') }
     ];
@@ -3492,9 +3493,7 @@ function TriggerNode({ data, isConnectable, id }: any) {
           {localConditionType !== 'any' && localConditionType !== 'media' && (
             <div>
               <label className="block mb-1 font-medium">
-                {localConditionType === 'contains' ? t('flow_builder.trigger_word_phrase', 'Word or Phrase') :
-                 localConditionType === 'exact' ? t('flow_builder.trigger_exact_text', 'Exact Text') :
-                 localConditionType === 'multiple_keywords' ? t('flow_builder.trigger_multiple_keywords', 'Multiple Keywords') : t('flow_builder.trigger_pattern', 'Pattern')}
+                {localConditionType === 'multiple_keywords' ? t('flow_builder.trigger_multiple_keywords', 'Multiple Keywords') : t('flow_builder.trigger_pattern', 'Pattern')}
               </label>
               {localConditionType === 'multiple_keywords' ? (
                 <div>
@@ -3597,10 +3596,11 @@ function TriggerNode({ data, isConnectable, id }: any) {
                   type="checkbox"
                   id={`session-persistence-${id}`}
                   checked={enableSessionPersistence}
-                  onChange={(e) => handleEnableSessionPersistenceChange(e.target.checked)}
-                  className="w-3 h-3"
+                  readOnly
+                  disabled
+                  className="w-3 h-3 opacity-50 cursor-not-allowed"
                 />
-                <label htmlFor={`session-persistence-${id}`} className="text-xs">{t('flow_builder.trigger_enable', 'Enable')}</label>
+                <label htmlFor={`session-persistence-${id}`} className="text-xs text-gray-500 cursor-not-allowed">{t('flow_builder.trigger_enable', 'Enable')}</label>
               </div>
             </div>
             <div className="text-[9px] text-muted-foreground mb-2">
@@ -4760,6 +4760,9 @@ const nodeTypes: NodeTypes = {
   wait: WaitNode,
   quickreply: QuickReplyNode,
   whatsapp_interactive_buttons: WhatsAppInteractiveButtonsNode,
+  whatsapp_interactive_list: WhatsAppInteractiveListNode,
+  whatsapp_cta_url: WhatsAppCTAURLNode,
+  whatsapp_location_request: WhatsAppLocationRequestNode,
   whatsapp_poll: WhatsAppPollNode as any,
 
   ai_assistant: AIAssistantNode,
@@ -4908,7 +4911,10 @@ function NodeSelector({ onAdd, nodes }: { onAdd: (type: string) => void; nodes: 
     { type: 'message', name: t('flow_builder.node_types.text_message', 'Text Message'), section: t('flow_builder.sections.messages', 'Messages'), icon: MessageSquare, color: 'text-secondry', disabled: false },
     { type: 'quickreply', name: t('flow_builder.node_types.quick_reply_options', 'Quick Reply Options'), section: t('flow_builder.sections.messages', 'Messages'), icon: ListOrdered, color: 'text-blue-500', disabled: false },
     { type: 'whatsapp_poll', name: t('flow_builder.node_types.whatsapp_poll', 'WhatsApp Poll'), section: t('flow_builder.sections.messages', 'Messages'), icon: ListOrdered, color: 'text-green-600', disabled: false },
-    { type: 'whatsapp_interactive_buttons', name: t('flow_builder.node_types.whatsapp_interactive_buttons', 'WhatsApp Interactive Buttons'), section: t('flow_builder.sections.messages', 'Messages'), icon: Smartphone, color: 'text-green-600', disabled: false },
+    { type: 'whatsapp_interactive_buttons', name: t('flow_builder.node_types.whatsapp_interactive_buttons', 'WhatsApp Buttons'), section: t('flow_builder.sections.messages', 'Messages'), icon: Smartphone, color: 'text-green-600', disabled: false },
+    { type: 'whatsapp_interactive_list', name: t('flow_builder.node_types.whatsapp_interactive_list', 'WhatsApp List'), section: t('flow_builder.sections.messages', 'Messages'), icon: List, color: 'text-green-600', disabled: false },
+    { type: 'whatsapp_cta_url', name: t('flow_builder.node_types.whatsapp_cta_url', 'WhatsApp CTA URL'), section: t('flow_builder.sections.messages', 'Messages'), icon: ExternalLink, color: 'text-green-600', disabled: false },
+    { type: 'whatsapp_location_request', name: t('flow_builder.node_types.whatsapp_location_request', 'WA Location Request'), section: t('flow_builder.sections.messages', 'Messages'), icon: MapPin, color: 'text-green-600', disabled: false },
     { type: 'whatsapp_flows', name: t('flow_builder.node_types.whatsapp_flows', 'WhatsApp Flows'), section: t('flow_builder.sections.messages', 'Messages'), icon: MessageSquare, color: 'text-green-600', disabled: false },
     { type: 'image', name: t('flow_builder.node_types.image_message', 'Image Message'), section: t('flow_builder.sections.messages', 'Messages'), icon: Image, color: 'text-blue-500', disabled: false },
     { type: 'video', name: t('flow_builder.node_types.video_message', 'Video Message'), section: t('flow_builder.sections.messages', 'Messages'), icon: FileVideo, color: 'text-red-500', disabled: false },
@@ -5039,7 +5045,7 @@ function NodeSelector({ onAdd, nodes }: { onAdd: (type: string) => void; nodes: 
                         <IconComponent className={`h-4 w-4 mr-2 ${node.disabled ? 'text-muted-foreground' : node.color}`} />
                         <span className="flex items-center gap-2 flex-1">
                           {node.name}
-                          {node.type === 'whatsapp_flows' && (
+                          {(node.type === 'whatsapp_flows' || node.type === 'whatsapp_interactive_buttons' || node.type === 'whatsapp_interactive_list' || node.type === 'whatsapp_cta_url' || node.type === 'whatsapp_location_request') && (
                             <span className="px-1.5 py-0.5 text-[8px] font-medium bg-green-100 text-green-700 rounded border border-green-200">
                               Official API
                             </span>
@@ -5094,6 +5100,7 @@ function FlowEditor() {
   const [loading, setLoading] = useState(false);
   const [isAutoArranging, setIsAutoArranging] = useState(false);
   const [previousNodePositions, setPreviousNodePositions] = useState<Node[]>([]);
+  const [isAIAssistantOpen, setIsAIAssistantOpen] = useState(false);
 
   const { data: flowData, isLoading: isLoadingFlow } = useQuery({
     queryKey: ['/api/flows', flowId],
@@ -5324,6 +5331,25 @@ function FlowEditor() {
             ]
           };
           break;
+        case 'whatsapp_interactive_list':
+          nodeData = {
+            ...nodeData,
+            headerText: '',
+            bodyText: 'Please select an option:',
+            footerText: '',
+            buttonText: 'View Options',
+            sections: [
+              {
+                id: '1',
+                title: 'Options',
+                rows: [
+                  { id: '1', title: 'Option 1', description: '', payload: 'option_1' },
+                  { id: '2', title: 'Option 2', description: '', payload: 'option_2' }
+                ]
+              }
+            ]
+          };
+          break;
         case 'whatsapp_poll':
           nodeData = {
             ...nodeData,
@@ -5367,7 +5393,7 @@ function FlowEditor() {
             provider: 'openai',
             model: 'gpt-4o',
             apiKey: '',
-            prompt: 'You are a helpful assistant. Answer user questions concisely and accurately.\n\nWhen users request calendar-related tasks, you can:\n- Book appointments and meetings\n- Check availability for scheduling\n- Update or modify appointments\n- Cancel appointments when needed\n\nFor appointment booking:\n1. First check availability using the check_availability function\n2. Collect necessary details (title, date, time, attendees, location)\n3. Confirm all details with the user before booking\n4. Use book_appointment function to create the calendar event\n5. Provide confirmation with event details\n\nAlways be professional and ensure you have all required information before making calendar changes. Also make sure to ask the user about their email if they wish to know the previous appointments. So that we can fetch the previous appointments from the  calendar. Also make sure to not share any sensitive information with the user like appointemnts made by other users etc. Only give info to the user if they are the owner of the appointment.',
+            prompt: 'You are a helpful assistant. Answer user questions concisely and accurately.\n\nWhen users request calendar-related tasks, you can:\n- Book appointments and meetings\n- Check availability for scheduling\n- Update or modify appointments\n- Cancel appointments when needed\n\nFor appointment booking:\n1. First check availability\n2. Collect necessary details (title, date, time, attendees,email, location)\n3. Confirm all details with the user before booking\n4. Provide confirmation with event details\n\nAlways be professional and ensure you have all required information before making calendar changes. Also make sure to ask the user about their email if they wish to know the previous appointments. So that we can fetch the previous appointments from the  calendar. Also make sure to not share any sensitive information with the user like appointemnts made by other users etc. Only give info to the user if they are the owner of the event.',
             enableHistory: true,
             enableAudio: false,
             enableTaskExecution: false,
@@ -5872,6 +5898,23 @@ function FlowEditor() {
                 </Tooltip>
               </TooltipProvider>
             )}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={() => setIsAIAssistantOpen(true)}
+                    className="flex-1 sm:flex-none"
+                  >
+                    <Bot className="h-4 w-4 mr-2" />
+                    {t('flow_builder.main.ai_assistant', 'AI Assistant')}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{t('flow_builder.main.ai_assistant_tooltip', 'Get AI-powered suggestions for your flow')}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <Link href="/flows" className="flex-1 sm:flex-none">
               <Button variant="outline" className="w-full">{t('common.cancel', 'Cancel')}</Button>
             </Link>
@@ -5981,6 +6024,8 @@ function FlowEditor() {
           flowId={flowId || undefined}
           onApplyFlow={handleApplyAIFlow}
           onAddNode={onAddNode}
+          isOpen={isAIAssistantOpen}
+          onClose={() => setIsAIAssistantOpen(false)}
         />
       </div>
     </div>

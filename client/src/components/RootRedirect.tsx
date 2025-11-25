@@ -4,6 +4,7 @@ import { useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { settingsEvents, SETTINGS_EVENTS } from '@/lib/settings-events';
+import { preserveEmbedParam, isEmbeddedContext } from '@/utils/embed-context';
 
 export default function RootRedirect() {
   const { user, isLoading: authLoading } = useAuth();
@@ -42,24 +43,31 @@ export default function RootRedirect() {
   useEffect(() => {
     if (authLoading || websiteLoading) return;
 
+    const preserveEmbed = (path: string) => {
+      if (isEmbeddedContext()) {
+        const urlWithEmbed = preserveEmbedParam(path);
+        return urlWithEmbed.replace(window.location.origin, '');
+      }
+      return path;
+    };
 
     if (user) {
       if (user.isSuperAdmin) {
-        setLocation('/admin/dashboard');
+        setLocation(preserveEmbed('/admin/dashboard'));
       } else {
-        setLocation('/inbox');
+        setLocation(preserveEmbed('/inbox'));
       }
       return;
     }
 
 
     if (websiteSettings?.enabled) {
-      setLocation('/landing');
+      setLocation(preserveEmbed('/landing'));
       return;
     }
 
 
-    setLocation('/auth');
+    setLocation(preserveEmbed('/auth'));
   }, [user, authLoading, websiteSettings, websiteLoading, setLocation]);
 
 

@@ -257,7 +257,7 @@ export function PlanExpirationChecker() {
               Subscription Action Required
             </DialogTitle>
             <DialogDescription>
-              Your BotHive subscription needs attention to continue using the service.
+              Your PowerChat subscription needs attention to continue using the service.
             </DialogDescription>
           </DialogHeader>
 

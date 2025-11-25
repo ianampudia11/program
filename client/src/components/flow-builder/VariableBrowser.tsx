@@ -423,10 +423,10 @@ export function VariableBrowser({ flowId, sessionId, onVariableSelect, className
               </div>
               {availableSessions.length > 0 && (
                 <div className="flex items-center gap-1 flex-shrink-0">
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <AlertDialog>
+                  <AlertDialog>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
                           <AlertDialogTrigger asChild>
                             <Button
                               variant="outline"
@@ -441,30 +441,30 @@ export function VariableBrowser({ flowId, sessionId, onVariableSelect, className
                               )}
                             </Button>
                           </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Clear All Sessions</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                Are you sure you want to delete all {availableSessions.length} sessions for this flow? This will permanently remove all session data and cannot be undone.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={handleClearAllSessions}
-                                className="bg-red-600 hover:bg-red-700"
-                              >
-                                Delete All Sessions
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>Clear all sessions for this flow</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Clear all sessions for this flow</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Clear All Sessions</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Are you sure you want to delete all {availableSessions.length} sessions for this flow? This will permanently remove all session data and cannot be undone.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={handleClearAllSessions}
+                          className="bg-red-600 hover:bg-red-700"
+                        >
+                          Delete All Sessions
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </div>
               )}
             </div>

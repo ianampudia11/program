@@ -46,6 +46,7 @@ import {
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
+import type { SegmentFilterCriteria } from '../../../../shared/schema';
 
 interface CreateSegmentModalProps {
   isOpen: boolean;
@@ -53,11 +54,7 @@ interface CreateSegmentModalProps {
   onSegmentCreated: (segment: any) => void;
 }
 
-interface SegmentCriteria {
-  tags: string[];
-  created_after?: string;
-  created_before?: string;
-}
+type SegmentCriteria = SegmentFilterCriteria;
 
 interface ContactPreview {
   id: number;
@@ -158,7 +155,7 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
   );
 
   useEffect(() => {
-    if (isOpen && (criteria.tags.length > 0 || criteria.created_after || criteria.created_before)) {
+    if (isOpen && ((criteria.tags?.length ?? 0) > 0 || criteria.created_after || criteria.created_before)) {
       debouncedPreview(criteria);
     } else {
       setContactCount(null);
@@ -206,10 +203,10 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
     Math.max(0, contactCount - excludedContactIds.length - invalidPhoneContacts.length) : null;
 
   const handleAddTag = () => {
-    if (newTag.trim() && !criteria.tags.includes(newTag.trim())) {
+    if (newTag.trim() && !(criteria.tags ?? []).includes(newTag.trim())) {
       setCriteria(prev => ({
         ...prev,
-        tags: [...prev.tags, newTag.trim()]
+        tags: [...(prev.tags ?? []), newTag.trim()]
       }));
       setNewTag('');
     }
@@ -218,7 +215,7 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
   const handleRemoveTag = (tagToRemove: string) => {
     setCriteria(prev => ({
       ...prev,
-      tags: prev.tags.filter(tag => tag !== tagToRemove)
+      tags: (prev.tags ?? []).filter(tag => tag !== tagToRemove)
     }));
   };
 
@@ -349,7 +346,7 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
         setCsvImportStep('results'); // Add this line to show results
 
 
-        if (criteria.tags.length > 0 || criteria.created_after || criteria.created_before) {
+        if ((criteria.tags?.length ?? 0) > 0 || criteria.created_after || criteria.created_before) {
           debouncedPreview(criteria);
         }
 
@@ -392,7 +389,7 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
       return;
     }
 
-    if (criteria.tags.length === 0 && !criteria.created_after && !criteria.created_before) {
+    if ((criteria.tags?.length ?? 0) === 0 && !criteria.created_after && !criteria.created_before) {
       toast({
         title: t('common.error', 'Error'),
         description: t('segments.create.criteria_required', 'Please add at least one filter criteria'),
@@ -409,8 +406,10 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
         body: JSON.stringify({
           name: formData.name,
           description: formData.description,
-          criteria,
-          excludedContactIds
+          criteria: {
+            ...criteria,
+            excludedContactIds
+          }
         })
       });
 
@@ -542,9 +541,9 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
                   </Button>
                 </div>
 
-                {criteria.tags.length > 0 && (
+                {(criteria.tags?.length ?? 0) > 0 && (
                   <div className="flex flex-wrap gap-2">
-                    {criteria.tags.map((tag, index) => (
+                    {(criteria.tags ?? []).map((tag, index) => (
                       <Badge key={index} variant="secondary" className="flex items-center gap-1">
                         <Tag className="w-3 h-3" />
                         {tag}
@@ -581,15 +580,18 @@ export function CreateSegmentModal({ isOpen, onClose, onSegmentCreated }: Create
               {effectiveContactCount !== null && (
                 <div className="text-sm text-muted-foreground">
                   {hasMoreContacts ? (
-                    <>{t('segments.create.showing_first_50', 'Showing first 50 of')} <strong>{effectiveContactCount}</strong> {t('segments.create.contacts', 'contacts')}</>
+                    <>{t('segments.create.showing_first_50', 'Showing first 50 of')} <strong>{effectiveContactCount}</strong> {t('segments.create.unique_contacts', 'unique contacts')}</>
                   ) : (
-                    <><strong>{effectiveContactCount}</strong> {t('segments.create.contacts_match_criteria', 'contacts match these criteria')}</>
+                    <><strong>{effectiveContactCount}</strong> {t('segments.create.unique_contacts_match_criteria', 'unique contacts match these criteria')}</>
                   )}
                   {excludedContactIds.length > 0 && (
                     <span className="text-orange-600 ml-2">
                       ({excludedContactIds.length} {t('segments.create.excluded', 'excluded')})
                     </span>
                   )}
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {t('segments.create.deduplication_note', 'Note: Duplicates by phone number are automatically removed. Counts reflect unique phone numbers.')}
+                  </div>
                 </div>
               )}
             </div>

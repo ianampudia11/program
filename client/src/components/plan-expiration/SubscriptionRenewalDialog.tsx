@@ -14,6 +14,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useMutation } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { getPlanBillingPeriod, formatPlanDurationForDisplay } from '@/utils/plan-duration';
+import { useCurrency } from '@/contexts/currency-context';
 
 interface SubscriptionRenewalDialogProps {
   isOpen: boolean;
@@ -47,6 +48,7 @@ export default function SubscriptionRenewalDialog({
   const { plans, isLoading: loadingPlans } = useAvailablePlans();
   const { settings: generalSettings, isLoading: isLoadingSettings } = useGeneralSettings();
   const { toast } = useToast();
+  const { formatCurrency } = useCurrency();
 
 
   React.useEffect(() => {
@@ -171,7 +173,7 @@ export default function SubscriptionRenewalDialog({
                 <div className="flex justify-between items-center p-3 bg-muted rounded-lg">
                   <span className="font-semibold">Amount:</span>
                   <span className="text-lg font-bold">
-                    ${selectedPlanId ? Number(plans.find(p => p.id === selectedPlanId)?.price || 0).toFixed(2) : planPrice.toFixed(2)}
+                    {formatCurrency(selectedPlanId ? Number(plans.find(p => p.id === selectedPlanId)?.price || 0) : planPrice)}
                   </span>
                 </div>
                 <div className="flex justify-between items-center p-3 bg-blue-50 rounded-lg">
@@ -444,7 +446,7 @@ export default function SubscriptionRenewalDialog({
                                 </div>
                                 <div className="text-right">
                                   <div className="text-xl font-bold">
-                                    ${Number(plan.price).toFixed(2)}
+                                    {formatCurrency(Number(plan.price))}
                                   </div>
                                   <div className="text-xs text-muted-foreground">
                                     {getPlanBillingPeriod(plan)}
@@ -468,7 +470,7 @@ export default function SubscriptionRenewalDialog({
                       <span className="font-medium">Selected Plan Total:</span>
                       <div className="text-right">
                         <span className="font-bold">
-                          ${Number(selectedPlan.price).toFixed(2)}
+                          {formatCurrency(Number(selectedPlan.price))}
                         </span>
                         <div className="text-xs text-muted-foreground">
                           {getPlanBillingPeriod(selectedPlan)}

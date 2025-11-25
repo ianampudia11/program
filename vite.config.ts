@@ -49,6 +49,7 @@ export default defineConfig(({ mode }) => {
   server: {
     port: parseInt(backendPort),
     host: true,
+    allowedHosts: true,
     hmr: {
       overlay: false,
       port: parseInt(backendPort) + 1,
@@ -104,7 +105,7 @@ export default defineConfig(({ mode }) => {
 
           const appRoutes = [
             '/auth', '/login', '/register', '/dashboard', '/admin', '/settings',
-            '/profile', '/logout', '/inbox', '/flows', '/contacts', '/calendar',
+            '/profile', '/logout', '/inbox', '/flows', '/contacts', '/tasks', '/calendar',
             '/analytics', '/campaigns', '/pipeline', '/pages', '/users', '/billing',
             '/integrations', '/reports', '/templates', '/webhooks'
           ];

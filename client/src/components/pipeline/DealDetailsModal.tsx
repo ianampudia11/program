@@ -29,29 +29,77 @@ interface DealDetailsModalProps {
 export default function DealDetailsModal({ deal, isOpen, onClose }: DealDetailsModalProps) {
   const { data: contact } = useQuery({
     queryKey: ['/api/contacts', deal?.contactId],
-    queryFn: () => apiRequest('GET', `/api/contacts/${deal?.contactId}`)
-      .then(res => res.json()),
+    queryFn: async () => {
+      try {
+        const res = await fetch(`/api/contacts/${deal?.contactId}`, {
+          credentials: 'include',
+        });
+        if (res.ok) {
+          return res.json();
+        }
+        return null;
+      } catch (error) {
+        console.warn('Failed to fetch contact:', error);
+        return null;
+      }
+    },
     enabled: !!deal?.contactId && typeof deal.contactId === 'number',
   });
 
   const { data: assignedUser } = useQuery({
     queryKey: ['/api/users', deal?.assignedToUserId],
-    queryFn: () => apiRequest('GET', `/api/users/${deal?.assignedToUserId}`)
-      .then(res => res.json()),
+    queryFn: async () => {
+      try {
+        const res = await fetch(`/api/users/${deal?.assignedToUserId}`, {
+          credentials: 'include',
+        });
+        if (res.ok) {
+          return res.json();
+        }
+        return null;
+      } catch (error) {
+        console.warn('Failed to fetch assigned user:', error);
+        return null;
+      }
+    },
     enabled: !!deal?.assignedToUserId && typeof deal.assignedToUserId === 'number',
   });
 
   const { data: pipelineStage } = useQuery({
     queryKey: ['/api/pipeline/stages', deal?.stageId],
-    queryFn: () => apiRequest('GET', `/api/pipeline/stages/${deal?.stageId}`)
-      .then(res => res.json()),
+    queryFn: async () => {
+      try {
+        const res = await fetch(`/api/pipeline/stages/${deal?.stageId}`, {
+          credentials: 'include',
+        });
+        if (res.ok) {
+          return res.json();
+        }
+        return null;
+      } catch (error) {
+        console.warn('Failed to fetch pipeline stage:', error);
+        return null;
+      }
+    },
     enabled: !!deal?.stageId && typeof deal.stageId === 'number',
   });
 
   const { data: activities = [] } = useQuery({
     queryKey: ['/api/deals', deal?.id, 'activities'],
-    queryFn: () => apiRequest('GET', `/api/deals/${deal?.id}/activities`)
-      .then(res => res.json()),
+    queryFn: async () => {
+      try {
+        const res = await fetch(`/api/deals/${deal?.id}/activities`, {
+          credentials: 'include',
+        });
+        if (res.ok) {
+          return res.json();
+        }
+        return [];
+      } catch (error) {
+        console.warn('Failed to fetch deal activities:', error);
+        return [];
+      }
+    },
     enabled: !!deal?.id && typeof deal.id === 'number',
   });
 

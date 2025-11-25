@@ -65,10 +65,12 @@ export default function ConversationItem({ conversation, isActive, onClick, sear
         return { icon: 'ri-message-2-line', color: '#10B981', name: t('conversations.item.channel.sms', 'SMS') };
       case 'webapp':
         return { icon: 'ri-global-line', color: '#8B5CF6', name: t('conversations.item.channel.web_chat', 'Web Chat') };
+      case 'webchat':
+        return { icon: 'ri-message-3-line', color: '#6366f1', name: t('conversations.item.channel.webchat', 'WebChat') };
       case 'telegram':
         return { icon: 'ri-telegram-line', color: '#0088CC', name: t('conversations.item.channel.telegram', 'Telegram') };
       default:
-        return { icon: 'ri-chat-1-line', color: '#333235', name: t('conversations.item.channel.chat', 'Chat') };
+        return { icon: 'ri-message-3-line', color: '#333235', name: t('conversations.item.channel.chat', 'Chat') };
     }
   };
 

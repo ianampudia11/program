@@ -25,7 +25,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Loader2, Plus, Upload, Download, AlertCircle, CheckCircle, X, Trash2, Search, Filter, MoreHorizontal, Phone, Mail, MapPin, Calendar, FileText, Archive, Users, Eye, Edit, Clock, Flag, User, CheckSquare, Square, AlertTriangle, ChevronDown, SortAsc, SortDesc } from 'lucide-react';
+import { Loader2, Plus, Upload, Download, AlertCircle, CheckCircle, X, Trash2, Search, Filter, MoreHorizontal, Phone, Mail, MapPin, Calendar, FileText, Archive, Users, Eye, Edit, Clock, Flag, User, CheckSquare, Square, AlertTriangle, ChevronDown, SortAsc, SortDesc, Smartphone } from 'lucide-react';
 import AgentDisplay from '@/components/contacts/AgentDisplay';
 import { AuditLogTimeline } from '@/components/contacts/AuditLogTimeline';
 import { useGoogleCalendarAuth } from '@/hooks/useGoogleCalendarAuth';
@@ -260,7 +260,7 @@ export default function Contacts() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [channelFilter, setChannelFilter] = useState('all');
   const [tagsFilter, setTagsFilter] = useState<string[]>([]);
-  const [itemsPerPage] = useState(10);
+  const [itemsPerPage] = useState(500);
   const [deleteContactId, setDeleteContactId] = useState<number | null>(null);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
@@ -322,11 +322,10 @@ export default function Contacts() {
 
 
   const [isWhatsAppScrapingModalOpen, setIsWhatsAppScrapingModalOpen] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
+  const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
   const [contactDetailTab, setContactDetailTab] = useState('dossier');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [archivedFilter, setArchivedFilter] = useState('active'); // 'all', 'active', 'archived'
   const [dateFilter, setDateFilter] = useState('all');
-  const [showArchived, setShowArchived] = useState(false);
 
 
   const [isArchiveDialogOpen, setIsArchiveDialogOpen] = useState(false);
@@ -795,7 +794,7 @@ export default function Contacts() {
   });
 
   const { data, isLoading } = useQuery({
-    queryKey: ['/api/contacts', currentPage, debouncedSearch, channelFilter, tagsFilter, statusFilter, dateFilter, itemsPerPage, showArchived],
+    queryKey: ['/api/contacts', currentPage, debouncedSearch, channelFilter, tagsFilter, archivedFilter, dateFilter, itemsPerPage],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.append('page', currentPage.toString());
@@ -813,16 +812,17 @@ export default function Contacts() {
         params.append('tags', tagsFilter.join(','));
       }
 
-      if (statusFilter && statusFilter !== 'all') {
-        params.append('status', statusFilter);
+
+      if (archivedFilter === 'archived') {
+        params.append('includeArchived', 'true');
+        params.append('archivedOnly', 'true');
+      } else if (archivedFilter === 'all') {
+        params.append('includeArchived', 'true');
       }
+
 
       if (dateFilter && dateFilter !== 'all') {
         params.append('dateRange', dateFilter);
-      }
-
-      if (showArchived) {
-        params.append('includeArchived', 'true');
       }
 
       const response = await fetch(`/api/contacts?${params.toString()}`);
@@ -839,44 +839,50 @@ export default function Contacts() {
   const rawContacts: Contact[] = Array.isArray(data?.contacts) ? data.contacts : [];
 
 
+
   const filteredContacts = rawContacts.filter(contact => {
 
-    if (activeTab === 'archives') {
-
-      if (!(contact as any).isArchived) {
-        return false;
-      }
-    } else if (activeTab === 'all') {
 
 
-    } else {
-
-      if ((contact as any).isArchived) {
-        return false;
-      }
-    }
 
     if (contact.phone && isWhatsAppGroupChatId(contact.phone)) {
+
       return false;
     }
 
     if (contact.identifier && isWhatsAppGroupChatId(contact.identifier)) {
+
       return false;
     }
+
 
     if (contact.phone) {
       const phoneValidation = validatePhoneNumber(contact.phone);
       if (!phoneValidation.isValid) {
+
         return false;
       }
     }
 
+
+
+
+
+
+
     if (contact.identifier) {
-      const identifierValidation = validatePhoneNumber(contact.identifier);
-      if (!identifierValidation.isValid) {
-        return false;
+      const looksLikePhone = /^[\d+]/.test(contact.identifier);
+      if (looksLikePhone) {
+        const identifierValidation = validatePhoneNumber(contact.identifier);
+        if (!identifierValidation.isValid) {
+
+          return false;
+        }
+      } else {
+
       }
     }
+
 
     return true;
   });
@@ -884,6 +890,7 @@ export default function Contacts() {
 
   const deduplicatedContacts = filteredContacts.reduce((acc: Contact[], contact) => {
     if (!contact.phone) {
+
 
       acc.push(contact);
       return acc;
@@ -896,17 +903,23 @@ export default function Contacts() {
 
     if (existingIndex === -1) {
 
+
       acc.push(contact);
     } else {
 
       const existing = acc[existingIndex];
       if (new Date(contact.createdAt) > new Date(existing.createdAt)) {
+        
         acc[existingIndex] = contact;
+      } else {
+        
       }
     }
 
     return acc;
   }, []);
+
+
 
   const contacts: Contact[] = deduplicatedContacts;
   const totalContacts = data?.total || 0;
@@ -1734,7 +1747,12 @@ export default function Contacts() {
   };
 
 
-  const activeFiltersCount = [channelFilter, statusFilter, dateFilter].filter(filter => filter && filter !== 'all').length + tagsFilter.length;
+  const activeFiltersCount = [
+    channelFilter !== 'all' ? 1 : 0,
+    archivedFilter !== 'active' ? 1 : 0,
+    dateFilter !== 'all' ? 1 : 0,
+    tagsFilter.length
+  ].reduce((a, b) => a + b, 0);
   
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-gray-50">
@@ -1752,7 +1770,7 @@ export default function Contacts() {
                 <button
                   onClick={() => {
                     setActiveTab('all');
-                    setShowArchived(true);
+                    setArchivedFilter('all');
                     setCurrentPage(1);
                   }}
                   className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
@@ -1766,7 +1784,7 @@ export default function Contacts() {
                 <button
                   onClick={() => {
                     setActiveTab('contacts');
-                    setShowArchived(false);
+                    setArchivedFilter('active');
                     setCurrentPage(1);
                   }}
                   className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
@@ -1781,7 +1799,7 @@ export default function Contacts() {
                 <button
                   onClick={() => {
                     setActiveTab('archives');
-                    setShowArchived(true);
+                    setArchivedFilter('archived');
                     setCurrentPage(1);
                   }}
                   className={`text-sm font-medium pb-2 border-b-2 transition-colors ${
@@ -1822,15 +1840,24 @@ export default function Contacts() {
                 <Download className="h-4 w-4" />
               </Button>
               <Button
-                onClick={() => setShowFilters(!showFilters)}
-                variant={showFilters ? "default" : "outline"}
+                onClick={() => setIsWhatsAppScrapingModalOpen(true)}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-1 bg-green-50 border-green-300 text-green-700 hover:bg-green-100"
+                title="Scrape WhatsApp Contacts"
+              >
+                <Smartphone className="h-4 w-4" />
+              </Button>
+              <Button
+                onClick={() => setIsFilterDialogOpen(true)}
+                variant="outline"
                 size="sm"
                 className={`flex items-center gap-1 relative ${
                   activeFiltersCount > 0
-                    ? 'bg-blue-50 border-blue-300 text-blue-700' 
+                    ? 'bg-blue-50 border-blue-300 text-blue-700'
                     : ''
                 }`}
-                title={`Toggle Filters${activeFiltersCount > 0 ? ` (${activeFiltersCount} active)` : ''}`}
+                title={`Filters${activeFiltersCount > 0 ? ` (${activeFiltersCount} active)` : ''}`}
               >
                 <Filter className="h-4 w-4" />
                 {activeFiltersCount > 0 && (
@@ -1857,7 +1884,7 @@ export default function Contacts() {
                     >
                       Segment
                     </Button>
-                    {!showArchived ? (
+                    {archivedFilter !== 'archived' ? (
                       <Button
                         variant="outline"
                         size="sm"
@@ -1908,220 +1935,41 @@ export default function Contacts() {
               </div>
             </div>
 
-            {/* Filters Panel */}
-            {showFilters && (
-              <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 space-y-3">
-                {/* Channel Filter */}
-                <div>
-                  <Label className="text-xs font-medium text-gray-700 mb-1 block">Channel</Label>
-                  <Select value={channelFilter} onValueChange={(value) => {
-                    setChannelFilter(value);
-                    setCurrentPage(1);
-                  }}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="All channels" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All channels</SelectItem>
-                      <SelectItem value="whatsapp_official">WhatsApp Official</SelectItem>
-                      <SelectItem value="whatsapp_unofficial">WhatsApp Unofficial</SelectItem>
-                      <SelectItem value="messenger">Facebook Messenger</SelectItem>
-                      <SelectItem value="instagram">Instagram</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Status Filter */}
-                <div>
-                  <Label className="text-xs font-medium text-gray-700 mb-1 block">Status</Label>
-                  <Select value={statusFilter} onValueChange={(value) => {
-                    setStatusFilter(value);
-                    setCurrentPage(1);
-                  }}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="All statuses" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All statuses</SelectItem>
-                      <SelectItem value="active">Active</SelectItem>
-                      <SelectItem value="inactive">Inactive</SelectItem>
-                      <SelectItem value="blocked">Blocked</SelectItem>
-                      <SelectItem value="pending">Pending</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Date Filter */}
-                <div>
-                  <Label className="text-xs font-medium text-gray-700 mb-1 block">Period</Label>
-                  <Select value={dateFilter} onValueChange={(value) => {
-                    setDateFilter(value);
-                    setCurrentPage(1);
-                  }}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="All periods" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All periods</SelectItem>
-                      <SelectItem value="today">Today</SelectItem>
-                      <SelectItem value="yesterday">Yesterday</SelectItem>
-                      <SelectItem value="last7days">Last 7 days</SelectItem>
-                      <SelectItem value="last30days">Last 30 days</SelectItem>
-                      <SelectItem value="last90days">Last 90 days</SelectItem>
-                      <SelectItem value="thismonth">This month</SelectItem>
-                      <SelectItem value="lastmonth">Last month</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {/* Tags Filter */}
-                <div>
-                  <Label className="text-xs font-medium text-gray-700 mb-1 block">Tags</Label>
-                  <Select
-                    value=""
-                    onValueChange={(value) => {
-                      if (value && !tagsFilter.includes(value)) {
-                        setTagsFilter(prev => [...prev, value]);
-                        setCurrentPage(1);
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="Add a tag" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableTags.map((tag: string) => (
-                        <SelectItem 
-                          key={tag} 
-                          value={tag}
-                          disabled={tagsFilter.includes(tag)}
-                        >
-                          {tag}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  
-                  {/* Selected Tags */}
-                  {tagsFilter.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {tagsFilter.map((tag) => (
-                        <Badge
-                          key={tag}
-                          variant="secondary"
-                          className="text-xs px-2 py-0.5 flex items-center gap-1"
-                        >
-                          {tag}
-                          <button
-                            onClick={() => {
-                              setTagsFilter(prev => prev.filter(t => t !== tag));
-                              setCurrentPage(1);
-                            }}
-                            className="ml-1 hover:text-red-600"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </Badge>
-                      ))}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setTagsFilter([]);
-                          setCurrentPage(1);
-                        }}
-                        className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700"
-                      >
-                        Clear all
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Archive Filter */}
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs font-medium text-gray-700">Show Archived Contacts</Label>
-                  <div className="flex items-center space-x-2">
-                    <input
-                      type="checkbox"
-                      id="showArchived"
-                      checked={showArchived}
-                      onChange={(e) => {
-                        setShowArchived(e.target.checked);
-                        setCurrentPage(1);
-                      }}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <label htmlFor="showArchived" className="text-xs text-gray-600">
-                      Include archived contacts in results
-                    </label>
-                  </div>
-                </div>
-
-                {/* Filter Actions */}
-                <div className="pt-2 border-t border-gray-200 flex space-x-2">
-                  <Button
-                    onClick={() => {
-                      setChannelFilter('all');
-                      setStatusFilter('all');
-                      setDateFilter('all');
-                      setTagsFilter([]);
-                      setShowArchived(false);
-                      setCurrentPage(1);
-                    }}
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 text-xs"
-                  >
-                    Reset
-                  </Button>
-                  <Button
-                    onClick={() => setIsWhatsAppScrapingModalOpen(true)}
-                    variant="outline"
-                    size="sm"
-                    className="flex-1 text-xs"
-                  >
-                    <Search className="h-3 w-3 mr-1" />
-                    Find Leads
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* Active Filters Summary */}
-            {!showFilters && activeFiltersCount > 0 && (
-              <div className="px-4 py-2 border-b border-gray-200 bg-blue-50">
+            {/* Select All Checkbox */}
+            {contacts.length > 0 && (
+              <div className="px-4 py-2 border-b border-gray-200 bg-gray-50">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-blue-700 font-medium">
-                      {activeFiltersCount} active filter{activeFiltersCount > 1 ? 's' : ''}
-                    </span>
+                    <Checkbox
+                      id="select-all"
+                      checked={selectedContacts.size === contacts.length && contacts.length > 0}
+                      onCheckedChange={handleSelectAll}
+                      className="h-4 w-4"
+                    />
+                    <label
+                      htmlFor="select-all"
+                      className="text-sm font-medium text-gray-700 cursor-pointer select-none"
+                    >
+                      Select All ({contacts.length})
+                    </label>
+                  </div>
+                  {selectedContacts.size > 0 && (
                     <Button
-                      onClick={() => setShowFilters(true)}
                       variant="ghost"
                       size="sm"
-                      className="text-xs text-blue-700 hover:text-blue-900 px-2 py-1 h-auto"
+                      onClick={handleClearSelection}
+                      className="text-xs text-gray-600 hover:text-gray-900 h-auto py-1 px-2"
                     >
-                      View
+                      Clear Selection
                     </Button>
-                  </div>
-                  <Button
-                    onClick={() => {
-                      setChannelFilter('all');
-                      setStatusFilter('all');
-                      setDateFilter('all');
-                      setTagsFilter([]);
-                      setCurrentPage(1);
-                    }}
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs text-blue-700 hover:text-blue-900 px-2 py-1 h-auto"
-                  >
-                    Clear all
-                  </Button>
+                  )}
                 </div>
               </div>
             )}
+
+
+
+
 
             {/* Contacts List */}
             <div className="flex-1 overflow-y-auto">
@@ -3541,7 +3389,169 @@ export default function Contacts() {
         onClose={() => setIsWhatsAppScrapingModalOpen(false)}
       />
 
+      {/* Filter Dialog */}
+      <Dialog open={isFilterDialogOpen} onOpenChange={setIsFilterDialogOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Filter className="h-5 w-5" />
+              Filter Contacts
+            </DialogTitle>
+            <DialogDescription>
+              Apply filters to narrow down your contact list
+            </DialogDescription>
+          </DialogHeader>
 
+          <div className="space-y-4 py-4">
+            {/* Channel Filter */}
+            <div>
+              <Label className="text-sm font-medium text-gray-700 mb-2 block">Channel</Label>
+              <Select value={channelFilter} onValueChange={(value) => {
+                setChannelFilter(value);
+                setCurrentPage(1);
+              }}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All channels" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All channels</SelectItem>
+                  <SelectItem value="whatsapp_official">WhatsApp Official</SelectItem>
+                  <SelectItem value="whatsapp_unofficial">WhatsApp Unofficial</SelectItem>
+                  <SelectItem value="messenger">Facebook Messenger</SelectItem>
+                  <SelectItem value="instagram">Instagram</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Archived Filter */}
+            <div>
+              <Label className="text-sm font-medium text-gray-700 mb-2 block">Archived Status</Label>
+              <Select value={archivedFilter} onValueChange={(value) => {
+                setArchivedFilter(value);
+                setCurrentPage(1);
+              }}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Active contacts" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Active only</SelectItem>
+                  <SelectItem value="archived">Archived only</SelectItem>
+                  <SelectItem value="all">All contacts</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Date Filter */}
+            <div>
+              <Label className="text-sm font-medium text-gray-700 mb-2 block">Period</Label>
+              <Select value={dateFilter} onValueChange={(value) => {
+                setDateFilter(value);
+                setCurrentPage(1);
+              }}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All periods" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All periods</SelectItem>
+                  <SelectItem value="today">Today</SelectItem>
+                  <SelectItem value="yesterday">Yesterday</SelectItem>
+                  <SelectItem value="last7days">Last 7 days</SelectItem>
+                  <SelectItem value="last30days">Last 30 days</SelectItem>
+                  <SelectItem value="last90days">Last 90 days</SelectItem>
+                  <SelectItem value="thismonth">This month</SelectItem>
+                  <SelectItem value="lastmonth">Last month</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Tags Filter */}
+            <div>
+              <Label className="text-sm font-medium text-gray-700 mb-2 block">Tags</Label>
+              <Select
+                value=""
+                onValueChange={(value) => {
+                  if (value && !tagsFilter.includes(value)) {
+                    setTagsFilter(prev => [...prev, value]);
+                    setCurrentPage(1);
+                  }
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Add a tag" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableTags.map((tag: string) => (
+                    <SelectItem
+                      key={tag}
+                      value={tag}
+                      disabled={tagsFilter.includes(tag)}
+                    >
+                      {tag}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {/* Selected Tags */}
+              {tagsFilter.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {tagsFilter.map((tag) => (
+                    <Badge
+                      key={tag}
+                      variant="secondary"
+                      className="text-xs px-2 py-0.5 flex items-center gap-1"
+                    >
+                      {tag}
+                      <button
+                        onClick={() => {
+                          setTagsFilter(prev => prev.filter(t => t !== tag));
+                          setCurrentPage(1);
+                        }}
+                        className="ml-1 hover:text-red-600"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  ))}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setTagsFilter([]);
+                      setCurrentPage(1);
+                    }}
+                    className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    Clear all
+                  </Button>
+                </div>
+              )}
+            </div>
+
+          </div>
+
+          <DialogFooter className="flex gap-2">
+            <Button
+              onClick={() => {
+                setChannelFilter('all');
+                setArchivedFilter('active');
+                setDateFilter('all');
+                setTagsFilter([]);
+                setCurrentPage(1);
+              }}
+              variant="outline"
+            >
+              Reset All
+            </Button>
+            <Button
+              onClick={() => setIsFilterDialogOpen(false)}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              Apply Filters
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Unified Document Upload Modal */}
       <Dialog open={isDocumentUploadModalOpen} onOpenChange={setIsDocumentUploadModalOpen}>

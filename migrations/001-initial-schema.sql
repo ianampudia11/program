@@ -929,12 +929,14 @@ INSERT INTO companies (name, slug, plan, max_users, primary_color, active)
 VALUES ('System', 'system', 'enterprise', 999, '#333235', TRUE)
 ON CONFLICT (slug) DO NOTHING;
 
+-- Create default admin user
+-- Password: Admin@123456 (CHANGE THIS AFTER FIRST LOGIN!)
 INSERT INTO users (username, password, full_name, email, role, is_super_admin, company_id)
 SELECT
-  '${ADMIN_USERNAME}',
+  'admin',
   '29afa0d245666f74f88337abf5f76577d07a99132f5d5d6cc7902ce2ef2df5d13b545b36c5e7efd5830eeb243bc4dbb3b68fe560a9c1ed2e3de9af548bc2f66d.aa1da567baf11c4a100b592c24bcb9a8',
-  '${ADMIN_FULL_NAME}',
-  '${ADMIN_EMAIL}',
+  'Admin User',
+  'admin@app.com',
   'super_admin',
   TRUE,
   id
@@ -995,6 +997,8 @@ BEGIN
       "manage_pipeline": true,
       "view_calendar": true,
       "manage_calendar": true,
+      "view_tasks": true,
+      "manage_tasks": true,
       "view_campaigns": true,
       "create_campaigns": true,
       "edit_campaigns": true,
@@ -1033,6 +1037,8 @@ BEGIN
       "manage_pipeline": false,
       "view_calendar": true,
       "manage_calendar": false,
+      "view_tasks": true,
+      "manage_tasks": false,
       "view_campaigns": true,
       "create_campaigns": false,
       "edit_campaigns": false,
@@ -1916,12 +1922,12 @@ DECLARE
   current_permissions jsonb;
 BEGIN
   FOR company_record IN SELECT id FROM companies LOOP
-    
+
     SELECT COALESCE(permissions, '{}'::jsonb) INTO current_permissions
     FROM role_permissions
     WHERE company_id = company_record.id AND role = 'admin';
 
-    
+
     current_permissions := current_permissions || '{
       "view_campaigns": true,
       "create_campaigns": true,
@@ -1939,12 +1945,12 @@ BEGIN
     ON CONFLICT (company_id, role)
     DO UPDATE SET permissions = current_permissions;
 
-    
+
     SELECT COALESCE(permissions, '{}'::jsonb) INTO current_permissions
     FROM role_permissions
     WHERE company_id = company_record.id AND role = 'agent';
 
-    
+
     current_permissions := current_permissions || '{
       "view_campaigns": false,
       "create_campaigns": false,
@@ -1964,6 +1970,49 @@ BEGIN
   END LOOP;
 
   RAISE NOTICE 'Campaign permissions added to all companies successfully!';
+END $$;
+
+-- Add task permissions to all existing companies
+DO $$
+DECLARE
+  company_record RECORD;
+  current_permissions jsonb;
+BEGIN
+  FOR company_record IN SELECT id FROM companies LOOP
+    -- Update admin role permissions
+    SELECT COALESCE(permissions, '{}'::jsonb) INTO current_permissions
+    FROM role_permissions
+    WHERE company_id = company_record.id AND role = 'admin';
+
+    -- Add task permissions for admin
+    current_permissions := current_permissions || '{
+      "view_tasks": true,
+      "manage_tasks": true
+    }'::jsonb;
+
+    INSERT INTO role_permissions (company_id, role, permissions)
+    VALUES (company_record.id, 'admin', current_permissions)
+    ON CONFLICT (company_id, role)
+    DO UPDATE SET permissions = current_permissions;
+
+    -- Update agent role permissions
+    SELECT COALESCE(permissions, '{}'::jsonb) INTO current_permissions
+    FROM role_permissions
+    WHERE company_id = company_record.id AND role = 'agent';
+
+    -- Add task permissions for agent (view only)
+    current_permissions := current_permissions || '{
+      "view_tasks": true,
+      "manage_tasks": false
+    }'::jsonb;
+
+    INSERT INTO role_permissions (company_id, role, permissions)
+    VALUES (company_record.id, 'agent', current_permissions)
+    ON CONFLICT (company_id, role)
+    DO UPDATE SET permissions = current_permissions;
+  END LOOP;
+
+  RAISE NOTICE 'Task permissions added to all companies successfully!';
 END $$;
 
 

@@ -321,6 +321,7 @@ router.post('/segments', requireAnyPermission(['manage_segments']), async (req, 
       return res.status(400).json({ success: false, error: 'Company ID and User ID required' });
     }
 
+
     const { excludedContactIds, ...segmentData } = req.body;
     const segment = await campaignService.createSegment(companyId, userId, segmentData, excludedContactIds);
     res.json({ success: true, data: segment });
@@ -740,13 +741,6 @@ router.get('/:id/details', requireAnyPermission(['view_campaigns']), async (req,
     if (!campaign) {
       return res.status(404).json({ success: false, error: 'Campaign not found' });
     }
-
-    console.log('Campaign data:', {
-      id: campaign.id,
-      channelIds: campaign.channelIds,
-      channelIdsType: typeof campaign.channelIds,
-      channelIdsArray: Array.isArray(campaign.channelIds)
-    });
 
 
     let campaignWhatsAppAccounts: Array<{

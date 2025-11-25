@@ -149,6 +149,19 @@ export function create360DialogWebhookSecurity() {
 }
 
 /**
+ * TikTok specific webhook security middleware
+ */
+export function createTikTokWebhookSecurity() {
+  return createWebhookSecurityMiddleware({
+    signatureHeader: 'x-tiktok-signature',
+    rateLimit: {
+      windowMs: 1000, // 1 second
+      maxRequests: 10 // 10 requests per second per IP (matches TikTok rate limit)
+    }
+  });
+}
+
+/**
  * WhatsApp Business API webhook security middleware
  */
 export function createWhatsAppWebhookSecurity() {
@@ -219,13 +232,14 @@ export async function verifyWhatsAppWebhookSignature(
  * Enhanced logging for webhook security events
  */
 export function logWebhookSecurityEvent(
-  event: 'signature_verified' | 'signature_failed' | 'rate_limited' | 'timestamp_invalid',
+  event: 'signature_verified' | 'signature_failed' | 'rate_limited' | 'timestamp_invalid' | 'verification_success' | 'verification_failed' | 'signature_verification_failed',
   details: {
     ip?: string;
     userAgent?: string;
     endpoint?: string;
     connectionId?: number;
     error?: string;
+    reason?: string;
   }
 ) {
   const logData = {

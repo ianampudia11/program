@@ -27,6 +27,7 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
   const [sdkInitialized, setSdkInitialized] = useState(false);
   const [partnerConfigured, setPartnerConfigured] = useState(false);
   const [isCheckingConfig, setIsCheckingConfig] = useState(false);
+  const [partnerConfig, setPartnerConfig] = useState<any>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -37,14 +38,15 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
   const checkPartnerConfiguration = async () => {
     try {
       setIsCheckingConfig(true);
-      const response = await fetch('/api/admin/partner-configurations/meta');
+      const response = await fetch('/api/partner-configurations/meta/availability');
       
       if (response.ok) {
-        const config = await response.json();
-        setPartnerConfigured(config.isActive);
+        const result = await response.json();
+        setPartnerConfigured(result.isAvailable);
         
-        if (config.isActive) {
-          await initializeFacebookSDK(config);
+        if (result.isAvailable && result.config) {
+          setPartnerConfig(result.config);
+          await initializeFacebookSDK(result.config);
         }
       } else {
         setPartnerConfigured(false);
@@ -60,10 +62,14 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
   const initializeFacebookSDK = async (config: any) => {
     try {
       await initFacebookSDK(config.partnerApiKey);
+      
+
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
       setSdkInitialized(true);
       
-      setupWhatsAppSignupListener(async (response: any) => {
-        await handleSignupResponse(response);
+      setupWhatsAppSignupListener((response: any) => {
+        handleSignupResponse(response);
       });
       
     } catch (error) {
@@ -76,18 +82,23 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
     }
   };
 
-  const handleSignupResponse = async (response: any) => {
-    try {      
-      if (response.status === 'connected') {
-        await processSignupCallback(response);
-      } else {
-        throw new Error('Signup was not completed successfully');
-      }
-    } catch (error) {
-      console.error('Error handling signup response:', error);
+  const handleSignupResponse = (response: any) => {
+
+    if (response.status === 'connected') {
+
+      processSignupCallback(response).catch((error) => {
+        console.error('Error processing signup callback:', error);
+        toast({
+          title: "Signup Error",
+          description: "Failed to process WhatsApp Business account signup",
+          variant: "destructive"
+        });
+      });
+    } else {
+      console.error('Signup was not completed successfully:', response);
       toast({
         title: "Signup Error",
-        description: "Failed to process WhatsApp Business account signup",
+        description: "WhatsApp signup was not completed successfully",
         variant: "destructive"
       });
     }
@@ -155,13 +166,32 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
     }
 
     try {
-      const configId = 'your-whatsapp-config-id';
-      await launchWhatsAppSignup(configId, handleSignupResponse);
+      if (!partnerConfig?.configId) {
+        toast({
+          title: "Configuration Error",
+          description: "WhatsApp Configuration ID is not set in partner configuration",
+          variant: "destructive"
+        });
+        return;
+      }
+
+
+      if (!window.FB) {
+        toast({
+          title: "SDK Error",
+          description: "Facebook SDK is not available. Please refresh the page and try again.",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      await launchWhatsAppSignup(partnerConfig.configId, handleSignupResponse);
     } catch (error) {
       console.error('Error launching WhatsApp signup:', error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to launch WhatsApp signup";
       toast({
         title: "Error",
-        description: "Failed to launch WhatsApp signup",
+        description: errorMessage,
         variant: "destructive"
       });
     }
@@ -245,6 +275,20 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
             </ul>
           </div>
 
+          {window.location.protocol !== 'https:' && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <div className="flex items-center">
+                <AlertCircle className="h-4 w-4 text-yellow-600 mr-2" />
+                <div>
+                  <h4 className="font-medium text-yellow-900">HTTPS Required</h4>
+                  <p className="text-sm text-yellow-800 mt-1">
+                    WhatsApp signup requires HTTPS. Please access this application over HTTPS (https://) instead of HTTP.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {!sdkInitialized && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
               <div className="flex items-center">
@@ -266,7 +310,7 @@ export function MetaWhatsAppIntegratedOnboarding({ isOpen, onClose, onSuccess }:
           </Button>
           <Button 
             onClick={handleStartOnboarding}
-            disabled={isSubmitting || !sdkInitialized || !connectionName.trim()}
+            disabled={isSubmitting || !sdkInitialized || !connectionName.trim() || window.location.protocol !== 'https:'}
             className="w-full sm:w-auto"
           >
             {isSubmitting ? (

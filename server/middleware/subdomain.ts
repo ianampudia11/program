@@ -4,7 +4,15 @@ import { Company } from "@shared/schema";
 
 
 const subdomainLookupCache = new Map<string, { company: Company | null; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL = 60 * 1000; // 1 minute
+
+/**
+ * Invalidate subdomain cache for a specific subdomain
+ * Can be called from admin-routes when company branding or settings are updated
+ */
+export function invalidateSubdomainCache(subdomain: string): void {
+  subdomainLookupCache.delete(subdomain.toLowerCase());
+}
 
 declare global {
   namespace Express {
@@ -12,6 +20,7 @@ declare global {
       subdomain?: string;
       subdomainCompany?: Company;
       isSubdomainMode?: boolean;
+      isEmbedded?: boolean;
     }
   }
 }
@@ -199,9 +208,7 @@ export const subdomainMiddleware = async (req: Request, res: Response, next: Nex
 
 
       if (req.query.embed === 'true') {
-        res.setHeader('X-Frame-Options', 'ALLOWALL');
-      } else {
-        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        req.isEmbedded = true;
       }
 
       res.setHeader('X-Content-Type-Options', 'nosniff');

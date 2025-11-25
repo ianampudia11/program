@@ -34,6 +34,12 @@ export function WhatsAppScrapingModal({ isOpen, onClose }: WhatsAppScrapingModal
   const queryClient = useQueryClient();
 
 
+  useEffect(() => {
+    if (isOpen) {
+
+    }
+  }, [isOpen]);
+
   const [startingNumber, setStartingNumber] = useState('');
   const [count, setCount] = useState('100');
   const [selectedConnectionId, setSelectedConnectionId] = useState<number | null>(null);
@@ -61,18 +67,58 @@ export function WhatsAppScrapingModal({ isOpen, onClose }: WhatsAppScrapingModal
 
   const { data: connections = [], isLoading: isLoadingConnections } = useQuery({
     queryKey: ['/api/channel-connections'],
-    queryFn: async () => {
-      const response = await fetch('/api/channel-connections');
-      if (!response.ok) {
-        throw new Error('Failed to fetch connections');
-      }
-      const data = await response.json();
-      return data.filter((conn: WhatsAppConnection) => 
-        conn.channelType === 'whatsapp_unofficial' && conn.status === 'active'
+
+    select: (data: WhatsAppConnection[]) => {
+
+      console.log('[WhatsApp Scraping] All connections summary:', data.map((c: any) => ({
+        id: c.id,
+        name: c.accountName,
+        type: c.channelType,
+        status: c.status
+      })));
+
+
+
+      const filtered = data.filter((conn: WhatsAppConnection) =>
+        (conn.channelType === 'whatsapp_unofficial' || conn.channelType === 'whatsapp') &&
+        conn.status === 'active'
       );
+
+
+
+      console.log('[WhatsApp Scraping] Filtered connections summary:', filtered.map((c: any) => ({
+        id: c.id,
+        name: c.accountName,
+        type: c.channelType,
+        status: c.status
+      })));
+
+      return filtered;
     },
     enabled: isOpen
   });
+
+
+  useEffect(() => {
+    console.log('[WhatsApp Scraping] Connections state updated:', {
+      count: connections.length,
+      isLoading: isLoadingConnections,
+      connections: connections.map((c: any) => ({
+        id: c.id,
+        name: c.accountName,
+        type: c.channelType,
+        status: c.status
+      }))
+    });
+  }, [connections, isLoadingConnections]);
+
+
+  useEffect(() => {
+    if (connections.length === 1 && !selectedConnectionId) {
+
+      setSelectedConnectionId(connections[0].id);
+    }
+  }, [connections, selectedConnectionId]);
 
 
   const startScrapingWithSSE = async (data: { startingNumber: string; count: number; connectionId: number }) => {

@@ -118,7 +118,7 @@ export class PlanExpirationService {
         }
       }
 
-      if (company.name === 'BotHive Admin' || company.slug === 'powerchat-admin') {
+      if (company.name === 'PowerChat Admin' || company.slug === 'powerchat-admin') {
         return {
           allowed: true,
           expirationStatus: this.getDefaultExpirationStatus(),
@@ -254,7 +254,7 @@ export class PlanExpirationService {
             subscriptionStatus,
             canAccess: false,
             renewalRequired: true,
-            blockReason: 'Your trial period has expired. Please upgrade to a paid plan to continue using BotHive.',
+            blockReason: 'Your trial period has expired. Please upgrade to a paid plan to continue using PowerChat.',
             nextBillingDate: undefined
           };
         }
@@ -322,11 +322,11 @@ export class PlanExpirationService {
       renewalRequired = true;
       
       if (subscriptionStatus === 'cancelled') {
-        blockReason = 'Subscription has been cancelled. Please renew to continue using BotHive.';
+        blockReason = 'Subscription has been cancelled. Please renew to continue using PowerChat.';
       } else if (subscriptionStatus === 'past_due' || subscriptionStatus === 'overdue') {
-        blockReason = 'Payment is overdue. Please update your payment method to continue using BotHive.';
+        blockReason = 'Payment is overdue. Please update your payment method to continue using PowerChat.';
       } else {
-        blockReason = 'Your subscription has expired. Please renew to continue using BotHive.';
+        blockReason = 'Your subscription has expired. Please renew to continue using PowerChat.';
       }
     }
 
@@ -334,7 +334,7 @@ export class PlanExpirationService {
     if (['inactive', 'cancelled'].includes(subscriptionStatus) && !isInGracePeriod) {
       canAccess = false;
       renewalRequired = true;
-      blockReason = 'Your subscription is inactive. Please renew to continue using BotHive.';
+      blockReason = 'Your subscription is inactive. Please renew to continue using PowerChat.';
     }
 
     return {

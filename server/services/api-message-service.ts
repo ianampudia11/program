@@ -8,6 +8,7 @@ import whatsAppMetaPartnerService from './channels/whatsapp-meta-partner';
 import telegramService from './channels/telegram';
 import instagramService from './channels/instagram';
 import messengerService from './channels/messenger';
+import twilioSmsService from './channels/twilio-sms';
 
 export interface SendMessageRequest {
   channelId: number;
@@ -278,6 +279,9 @@ class ApiMessageService {
       case 'whatsapp_meta':
         return await whatsAppMetaPartnerService.sendMessage(connection.id, systemUserId, to, message);
 
+      case 'twilio_sms':
+        return await twilioSmsService.sendMessage(connection.id, systemUserId, to, message);
+
       case 'telegram':
         const telegramResult = await telegramService.sendMessage(connection.id, to, message, systemUserId);
         if (telegramResult.success && telegramResult.messageId) {
@@ -374,6 +378,9 @@ class ApiMessageService {
 
         const messengerMediaType = mediaType === 'document' ? 'file' : mediaType;
         return await messengerService.sendMedia(connection.id, to, mediaUrl, messengerMediaType as 'image' | 'video' | 'audio' | 'file');
+
+      case 'twilio_sms':
+        return await twilioSmsService.sendMedia(connection.id, systemUserId, to, mediaType, mediaUrl, caption);
 
       default:
         throw new Error(`Unsupported channel type for media: ${connection.channelType}`);

@@ -19,11 +19,11 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   requireAll = false,
   fallbackPath = '/access-denied'
 }) => {
-  const { user, isLoading: authLoading, isMaintenanceMode, isLoadingMaintenance } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
   const { hasPermission, hasAnyPermission, hasAllPermissions, isLoading: permissionsLoading } = usePermissions();
   const [, setLocation] = useLocation();
 
-  if (authLoading || permissionsLoading || isLoadingMaintenance) {
+  if (authLoading || permissionsLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="flex flex-col items-center space-y-4">
@@ -32,12 +32,6 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
         </div>
       </div>
     );
-  }
-
-
-  if (isMaintenanceMode && (!user || !user.isSuperAdmin)) {
-    setLocation('/maintenance');
-    return null;
   }
 
   if (!user) {
@@ -127,6 +121,12 @@ export const ContactsRoute: React.FC<{ children: React.ReactNode }> = ({ childre
   </ProtectedRoute>
 );
 
+export const TasksRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <ProtectedRoute permissions={['view_tasks', 'manage_tasks']} requireAll={false}>
+    {children}
+  </ProtectedRoute>
+);
+
 export const PipelineRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <ProtectedRoute permissions={['view_pipeline', 'manage_pipeline']} requireAll={false}>
     {children}
@@ -163,6 +163,12 @@ export const CampaignsRoute: React.FC<{ children: React.ReactNode }> = ({ childr
 
 export const PagesRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <ProtectedRoute permissions={['view_pages', 'manage_pages']} requireAll={false}>
+    {children}
+  </ProtectedRoute>
+);
+
+export const TemplatesRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <ProtectedRoute permissions={['manage_templates']} requireAll={false}>
     {children}
   </ProtectedRoute>
 );

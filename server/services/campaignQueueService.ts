@@ -2,12 +2,13 @@ import {
   campaignQueue,
   campaignRecipients,
   campaigns,
+  campaignTemplates,
   channelConnections,
   contacts
 } from '@shared/schema';
 import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm';
 import path from 'path';
-import { db } from '../db';
+import { getDb } from '../db';
 import {
   Campaign,
   CampaignProcessingResult,
@@ -17,10 +18,29 @@ import { CampaignEventEmitter } from '../utils/websocket';
 import { CampaignService } from './campaignService';
 import whatsappService from './channels/whatsapp';
 import whatsappOfficialService from './channels/whatsapp-official';
+import axios from 'axios';
+import FormData from 'form-data';
+import { storage } from '../storage';
+
+/**
+ * Normalize phone number to +E.164 format
+ * @param phone The phone number to normalize
+ * @returns Normalized phone number in +E.164 format
+ */
+function normalizePhoneToE164(phone: string): string {
+  if (!phone) return phone;
 
 
+  let normalized = phone.replace(/[^\d+]/g, '');
 
 
+  if (normalized.startsWith('+')) {
+    return normalized;
+  }
+
+
+  return '+' + normalized;
+}
 
 interface QueueItem {
   id: number;
@@ -74,9 +94,12 @@ interface ConnectionProcessingPool {
 }
 
 export class CampaignQueueService {
+  private static globalProcessingEnabled: boolean = true;
   private campaignService: CampaignService;
   private isGlobalProcessing: boolean;
   private processingInterval: NodeJS.Timeout | null;
+  private analyticsInterval: NodeJS.Timeout | null;
+  private cleanupInterval: NodeJS.Timeout | null;
   private accountRotation: Map<string, number>;
   private connectionPools: Map<number, ConnectionProcessingPool>;
   private maxConcurrentConnections: number;
@@ -86,6 +109,8 @@ export class CampaignQueueService {
     this.campaignService = new CampaignService();
     this.isGlobalProcessing = false;
     this.processingInterval = null;
+    this.analyticsInterval = null;
+    this.cleanupInterval = null;
     this.accountRotation = new Map<string, number>();
     this.connectionPools = new Map<number, ConnectionProcessingPool>();
     this.maxConcurrentConnections = 5; // Process up to 5 connections concurrently
@@ -98,61 +123,89 @@ export class CampaignQueueService {
 
   public startQueueProcessor(): void {
     if (this.isGlobalProcessing) {
+
       return;
     }
 
+    CampaignQueueService.globalProcessingEnabled = true;
     this.isGlobalProcessing = true;
+
 
 
     this.processingInterval = setInterval(async () => {
       try {
         await this.processConcurrentQueue();
-        await this.checkCampaignCompletion(); 
+        await this.checkCampaignCompletion();
       } catch (error) {
-        console.error('Queue processing error:', error);
+        console.error('[Campaign Queue] Queue processing error:', error);
       }
     }, 3000); // Reduced interval for more responsive processing
 
 
-    setInterval(async () => {
+
+
+    this.analyticsInterval = setInterval(async () => {
       try {
         await this.recordAnalyticsSnapshots();
       } catch (error) {
-        console.error('Analytics recording error:', error);
+        console.error('[Campaign Queue] Analytics recording error:', error);
       }
     }, 300000);
 
 
-    setInterval(() => {
+
+
+    this.cleanupInterval = setInterval(() => {
       this.cleanupInactivePools();
     }, 60000); // Cleanup every minute
+
+
+
   }
 
-  public stopQueueProcessor(): void {
+  public async stopQueueProcessor(): Promise<void> {
+
+    CampaignQueueService.globalProcessingEnabled = false;
+
+
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
       this.processingInterval = null;
     }
-    this.isGlobalProcessing = false;
-    
 
-    this.activeProcessingPromises.forEach(async (promise) => {
+
+    if (this.analyticsInterval) {
+      clearInterval(this.analyticsInterval);
+      this.analyticsInterval = null;
+    }
+
+
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+
+    this.isGlobalProcessing = false;
+
+
+    if (this.activeProcessingPromises.size > 0) {
+
       try {
-        await promise;
+        await Promise.all(Array.from(this.activeProcessingPromises.values()));
       } catch (error) {
-        console.error('Error waiting for processing to complete:', error);
+        console.error('[Campaign Queue] Error waiting for processing to complete:', error);
       }
-    });
-    
+    }
 
     this.connectionPools.clear();
     this.activeProcessingPromises.clear();
+
   }
 
   private async processQueue(): Promise<void> {
     try {
-      
-      const queueItems = await db.select({
+
+      const queueItems = await getDb().select({
         id: campaignQueue.id,
         campaign_id: campaignQueue.campaignId,
         recipient_id: campaignQueue.recipientId,
@@ -174,6 +227,7 @@ export class CampaignQueueService {
       ))
       .orderBy(asc(campaignQueue.priority), asc(campaignQueue.scheduledFor))
       .limit(50);
+
 
       if (queueItems.length === 0) {
         return;
@@ -226,7 +280,7 @@ export class CampaignQueueService {
   private async getCampaignChannelConnection(campaignId: number): Promise<ChannelConnection | null> {
     try {
       
-      const [campaign] = await db.select({
+      const [campaign] = await getDb().select({
         id: campaigns.id,
         channelId: campaigns.channelId,
         channelIds: campaigns.channelIds,
@@ -255,7 +309,7 @@ export class CampaignQueueService {
     
           
           if (campaign.channelId) {
-            const [fallbackConnection] = await db.select()
+            const [fallbackConnection] = await getDb().select()
               .from(channelConnections)
               .where(and(
                 eq(channelConnections.id, campaign.channelId),
@@ -271,7 +325,7 @@ export class CampaignQueueService {
         }
 
         
-        const [channelConnection] = await db.select()
+        const [channelConnection] = await getDb().select()
           .from(channelConnections)
           .where(and(
             eq(channelConnections.id, selectedChannelId),
@@ -291,7 +345,7 @@ export class CampaignQueueService {
       }
 
       
-      const [channelConnection] = await db.select()
+      const [channelConnection] = await getDb().select()
         .from(channelConnections)
         .where(and(
           eq(channelConnections.id, campaign.channelId),
@@ -332,7 +386,7 @@ export class CampaignQueueService {
 
       for (const channelId of channelIds) {
         try {
-          const account = await db.select()
+          const account = await getDb().select()
             .from(channelConnections)
             .where(and(
               eq(channelConnections.id, channelId),
@@ -371,7 +425,7 @@ export class CampaignQueueService {
         availableAccounts.map(async (account) => {
           try {
             
-            const allMessages = await db.select({
+            const allMessages = await getDb().select({
               completedAt: campaignQueue.completedAt
             })
             .from(campaignQueue)
@@ -520,7 +574,7 @@ export class CampaignQueueService {
         
         for (const channelId of channelIds) {
           try {
-            const fallbackAccount = await db.select()
+            const fallbackAccount = await getDb().select()
               .from(channelConnections)
               .where(and(
                 eq(channelConnections.id, channelId),
@@ -579,19 +633,20 @@ export class CampaignQueueService {
    * Process campaign items in batches to improve performance and reduce database load
    */
   private async processCampaignItemsBatch(campaignId: number, items: QueueItem[]): Promise<void> {
-    const BATCH_SIZE = 10; 
-    const BATCH_DELAY = 1000; 
+    const BATCH_SIZE = 10;
+    const BATCH_DELAY = 1000;
+
 
     try {
 
-      
+
       const channelConnection = await this.getCampaignChannelConnection(campaignId);
       if (!channelConnection) {
         await this.markItemsAsFailed(items.map(item => item.id), 'No channel connection available');
         return;
       }
 
-      
+
       if (channelConnection.status !== 'active') {
         await this.markItemsAsFailed(items.map(item => item.id), 'WhatsApp connection is not active');
         return;
@@ -604,7 +659,7 @@ export class CampaignQueueService {
       const recipientMap = new Map(recipientData.map(r => [r.id, r]));
 
       
-      const [campaignForSettings] = await db.select({
+      const [campaignForSettings] = await getDb().select({
         antiBanSettings: campaigns.antiBanSettings
       })
       .from(campaigns)
@@ -628,7 +683,7 @@ export class CampaignQueueService {
             }
 
             
-            await db.update(campaignQueue)
+            await getDb().update(campaignQueue)
               .set({
                 accountId: channelConnection.id,
                 status: 'processing',
@@ -666,12 +721,12 @@ export class CampaignQueueService {
 
   private async processQueueItem(queueItem: QueueItem): Promise<CampaignProcessingResult> {
     try {
-      
-      const [campaign] = await db.select()
+
+      const [campaign] = await getDb().select()
         .from(campaigns)
         .where(eq(campaigns.id, queueItem.campaign_id));
 
-      const [recipient] = await db.select({
+      const [recipient] = await getDb().select({
         id: campaignRecipients.id,
         contactId: campaignRecipients.contactId,
         variables: campaignRecipients.variables,
@@ -689,6 +744,7 @@ export class CampaignQueueService {
 
       const campaignData = campaign;
       const recipientData = recipient as RecipientData;
+
 
 
 
@@ -716,28 +772,96 @@ export class CampaignQueueService {
         recipient_name: recipientData.name || ''
       };
 
-      await db.update(campaignQueue)
+      await getDb().update(campaignQueue)
         .set({ metadata: updatedMetadata })
         .where(eq(campaignQueue.id, queueItem.id));
 
-      
-      
-      const [channelConnection] = await db.select()
+
+      const [channelConnection] = await getDb().select()
         .from(channelConnections)
         .where(eq(channelConnections.id, queueItem.account_id!));
 
       if (!channelConnection) {
+        console.error(`[Campaign Queue] Channel connection not found: ${queueItem.account_id}`);
         throw new Error(`Channel connection not found for connection ${queueItem.account_id}`);
       }
 
       const connection = channelConnection as ChannelConnection;
 
 
+      let templateData: any = null;
+      if (campaignData.templateId && connection.channelType === 'whatsapp_official') {
+
+        const [template] = await getDb().select()
+          .from(campaignTemplates)
+          .where(eq(campaignTemplates.id, campaignData.templateId));
+
+        if (template && template.whatsappTemplateName) {
+          templateData = template;
+
+        } else {
+          console.warn(`[Campaign Queue] Template ${campaignData.templateId} not found or missing WhatsApp template name`);
+        }
+      }
+
       const mediaUrls = (campaignData.mediaUrls as string[]) || [];
       const hasMedia = mediaUrls.length > 0;
       let result: any;
 
-      if (hasMedia) {
+
+      if (templateData && connection.channelType === 'whatsapp_official') {
+
+        if (!connection.companyId) {
+          console.error(`[Campaign Queue] Company ID missing for connection ${connection.id}`);
+          throw new Error('Company ID is required for WhatsApp Official template messages');
+        }
+
+
+        const components: any[] = [];
+
+
+        const templateVariables = (templateData.variables as string[]) || [];
+
+
+        if (templateVariables.length > 0) {
+          const allVarsMap = allVariables as Record<string, any>;
+          const bodyParameters = templateVariables.map((varName: string) => {
+            const value = allVarsMap[varName] || '';
+
+            return {
+              type: 'text',
+              text: value
+            };
+          });
+
+          components.push({
+            type: 'body',
+            parameters: bodyParameters
+          });
+        }
+
+
+
+
+
+        try {
+          result = await whatsappOfficialService.sendTemplateMessage(
+            connection.id,
+            connection.userId,
+            connection.companyId,
+            normalizePhoneToE164(recipientData.phone || ''),
+            templateData.whatsappTemplateName,
+            templateData.whatsappTemplateLanguage || 'en',
+            components.length > 0 ? components : undefined,
+            true // skipBroadcast - avoid duplicate client updates
+          );
+
+        } catch (error) {
+          console.error(`[Campaign Queue] Error sending template message:`, error);
+          throw error;
+        }
+      } else if (hasMedia) {
+
 
         for (const mediaUrl of mediaUrls) {
           const mediaType = this.getMediaTypeFromUrl(mediaUrl);
@@ -762,13 +886,14 @@ export class CampaignQueueService {
               connection.id,
               connection.userId,
               connection.companyId,
-              recipientData.phone || '',
+              normalizePhoneToE164(recipientData.phone || ''),
               mediaType,
               mediaUrl,
               personalizedContent,
               undefined,
               undefined,
-              true // isFromBot = true for campaign messages
+              true, // isFromBot = true for campaign messages
+              true  // skipBroadcast - avoid duplicate client updates
             );
           } else {
             throw new Error(`Unsupported channel type: ${connection.channelType}`);
@@ -778,8 +903,9 @@ export class CampaignQueueService {
           personalizedContent = '';
         }
 
-        
+
         if (personalizedContent.trim()) {
+
           if (connection.channelType === 'whatsapp_unofficial') {
             result = await whatsappService.sendWhatsAppMessage(
               connection.id,
@@ -795,10 +921,11 @@ export class CampaignQueueService {
               connection.id,
               connection.userId,
               connection.companyId,
-              recipientData.phone || '',
+              normalizePhoneToE164(recipientData.phone || ''),
               personalizedContent
             );
           }
+
         }
       } else {
 
@@ -817,35 +944,36 @@ export class CampaignQueueService {
             connection.id,
             connection.userId,
             connection.companyId,
-            recipientData.phone || '',
+            normalizePhoneToE164(recipientData.phone || ''),
             personalizedContent
           );
         } else {
           throw new Error(`Unsupported channel type: ${connection.channelType}`);
         }
+
       }
 
 
-      
-      await db.update(campaignQueue)
+
+      await getDb().update(campaignQueue)
         .set({
           status: 'completed',
           completedAt: new Date()
         })
         .where(eq(campaignQueue.id, queueItem.id));
 
-      
-      await db.update(campaignRecipients)
+
+      await getDb().update(campaignRecipients)
         .set({
           status: 'sent',
           sentAt: new Date()
         })
         .where(eq(campaignRecipients.id, queueItem.recipient_id));
 
-      
+
       await this.updateCampaignStatistics(queueItem.campaign_id);
 
-      
+
       const progressStats = await this.getCampaignProgress(queueItem.campaign_id);
 
 
@@ -861,6 +989,7 @@ export class CampaignQueueService {
           sentAt: new Date()
         }
       );
+
 
       return {
         success: true,
@@ -885,8 +1014,9 @@ export class CampaignQueueService {
     recipientData: RecipientData
   ): Promise<CampaignProcessingResult> {
     try {
-      
-      const [campaign] = await db.select()
+
+
+      const [campaign] = await getDb().select()
         .from(campaigns)
         .where(eq(campaigns.id, queueItem.campaign_id));
 
@@ -897,6 +1027,7 @@ export class CampaignQueueService {
       const campaignData = campaign;
 
 
+
       const allVariables = {
 
         name: recipientData.name || '',
@@ -905,6 +1036,308 @@ export class CampaignQueueService {
 
         ...(recipientData.variables || {})
       };
+
+
+      let templateData: any = null;
+      if (campaignData.templateId && channelConnection.channelType === 'whatsapp_official') {
+
+
+        const [template] = await getDb().select()
+          .from(campaignTemplates)
+          .where(eq(campaignTemplates.id, campaignData.templateId));
+
+        if (template && template.whatsappTemplateName) {
+          templateData = template;
+
+        } else {
+
+        }
+      }
+
+
+      if (templateData && channelConnection.channelType === 'whatsapp_official') {
+
+
+        if (!channelConnection.companyId) {
+          throw new Error('Company ID is required for WhatsApp Official template messages');
+        }
+
+
+        const components: any[] = [];
+        const templateVariables = (templateData.variables as string[]) || [];
+        
+
+        let templateMediaUrls = (templateData.mediaUrls as string[]) || [];
+        const campaignMediaUrls = (campaignData.mediaUrls as string[]) || [];
+        
+
+        const mediaUrls = campaignMediaUrls.length > 0 ? campaignMediaUrls : templateMediaUrls;
+        const mediaHandle = templateData.mediaHandle; // Get stored media handle from template
+
+        
+
+
+        const hasMediaHandle = !!mediaHandle;
+        const hasMediaUrls = mediaUrls.length > 0;
+        const hasCampaignMedia = campaignMediaUrls.length > 0;
+        const hasAnyMedia = hasMediaHandle || hasMediaUrls || hasCampaignMedia;
+
+
+
+
+
+
+        if (hasAnyMedia) {
+
+          let headerFormat = 'IMAGE'; // Default to IMAGE
+          
+
+          if (mediaUrls.length > 0) {
+            const urlLower = mediaUrls[0].toLowerCase();
+
+            if (urlLower.includes('/video/') || urlLower.match(/\.(mp4|mov|avi|webm)$/)) {
+              headerFormat = 'VIDEO';
+            } else if (urlLower.includes('/document/') || urlLower.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/)) {
+              headerFormat = 'DOCUMENT';
+            } else if (urlLower.includes('/image/') || urlLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) {
+              headerFormat = 'IMAGE';
+            }
+          }
+
+
+
+
+          const isMediaHandleUrl = mediaHandle && (mediaHandle.startsWith('http://') || mediaHandle.startsWith('https://'));
+          
+          if (isMediaHandleUrl) {
+            console.warn('[Campaign Queue] mediaHandle is a URL, not a media ID. Moving to mediaUrls for upload.');
+
+            if (!mediaUrls.includes(mediaHandle)) {
+              mediaUrls.unshift(mediaHandle); // Add to beginning
+            }
+          }
+
+          if (mediaHandle && !isMediaHandleUrl) {
+
+
+
+            
+            components.push({
+              type: 'header',
+              parameters: [{
+                type: headerFormat.toLowerCase(),
+                [headerFormat.toLowerCase()]: {
+                  id: mediaHandle  // Use the stored media handle
+                }
+              }]
+            });
+
+
+          } else if (mediaUrls.length > 0) {
+
+
+            let mediaUrl = mediaUrls[0];
+
+
+            if (!mediaUrl.startsWith('http://') && !mediaUrl.startsWith('https://')) {
+              const baseUrl = process.env.APP_URL || process.env.BASE_URL || process.env.PUBLIC_URL;
+
+              if (baseUrl) {
+                const cleanBaseUrl = baseUrl.replace(/\/$/, '');
+                const cleanMediaUrl = mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`;
+                mediaUrl = `${cleanBaseUrl}${cleanMediaUrl}`;
+              } else {
+                const basePort = process.env.PORT || '9000';
+                const host = process.env.HOST || 'localhost';
+                const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+
+                if (host === 'localhost' || host === '127.0.0.1') {
+                  mediaUrl = `${protocol}://${host}:${basePort}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
+                } else {
+                  mediaUrl = `${protocol}://${host}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
+                }
+              }
+            }
+
+
+
+            try {
+              const mediaId = await this.uploadMediaToWhatsApp(mediaUrl, headerFormat, channelConnection);
+
+
+
+              components.push({
+                type: 'header',
+                parameters: [{
+                  type: headerFormat.toLowerCase(),
+                  [headerFormat.toLowerCase()]: {
+                    id: mediaId
+                  }
+                }]
+              });
+
+            } catch (uploadError: any) {
+              console.error('[Campaign Queue] Failed to upload media, trying with link as fallback:', uploadError.message);
+              
+
+              components.push({
+                type: 'header',
+                parameters: [{
+                  type: headerFormat.toLowerCase(),
+                  [headerFormat.toLowerCase()]: {
+                    link: mediaUrl
+                  }
+                }]
+              });
+            }
+          } else {
+
+            console.error('[Campaign Queue] Template requires media header but no media URL or handle found!');
+            console.error('[Campaign Queue] Template data:', {
+              id: templateData.id,
+              name: templateData.whatsappTemplateName,
+              mediaUrls: templateData.mediaUrls,
+              mediaHandle: templateData.mediaHandle
+            });
+            
+            throw new Error(`Template "${templateData.whatsappTemplateName}" requires media in header, but no media URL or media handle is configured. Please upload media for this template or select a different template.`);
+          }
+        }
+
+
+        if (templateVariables.length > 0) {
+          const allVarsMap = allVariables as Record<string, any>;
+          const bodyParameters = templateVariables.map((varName: string) => {
+            const value = allVarsMap[varName] || '';
+
+            return { type: 'text', text: String(value) };
+          });
+
+          components.push({
+            type: 'body',
+            parameters: bodyParameters
+          });
+        }
+
+
+
+        console.log('[Campaign Queue] Sending template message:', {
+          templateName: templateData.whatsappTemplateName,
+          language: templateData.whatsappTemplateLanguage || 'en',
+          recipientPhone: recipientData.phone,
+          componentsCount: components.length,
+          hasMediaComponent: components.some(c => c.type === 'header'),
+          components: JSON.stringify(components, null, 2)
+        });
+
+        try {
+          const result = await whatsappOfficialService.sendTemplateMessage(
+            channelConnection.id,
+            channelConnection.userId,
+            channelConnection.companyId,
+            normalizePhoneToE164(recipientData.phone || ''),
+            templateData.whatsappTemplateName,
+            templateData.whatsappTemplateLanguage || 'en',
+            components.length > 0 ? components : undefined,
+            true // skipBroadcast - avoid duplicate client updates
+          );
+
+
+
+
+          await getDb().update(campaignQueue)
+            .set({
+              status: 'completed',
+              completedAt: new Date()
+            })
+            .where(eq(campaignQueue.id, queueItem.id));
+
+          await getDb().update(campaignRecipients)
+            .set({
+              status: 'sent',
+              sentAt: new Date()
+            })
+            .where(eq(campaignRecipients.id, queueItem.recipient_id));
+
+          await this.updateCampaignStatistics(queueItem.campaign_id);
+          const progressStats = await this.getCampaignProgress(queueItem.campaign_id);
+
+          CampaignEventEmitter.emitMessageSent(
+            queueItem.campaign_id,
+            campaignData.companyId,
+            progressStats,
+            {
+              campaignName: campaignData.name,
+              recipientPhone: recipientData.phone || '',
+              recipientName: recipientData.name || '',
+              messageId: result?.messageId || result?.id,
+              sentAt: new Date()
+            }
+          );
+
+          return {
+            success: true,
+            messageId: result?.messageId || result?.id,
+            timestamp: new Date(),
+            accountId: queueItem.account_id || undefined,
+            recipientPhone: recipientData.phone || ''
+          };
+        } catch (error: any) {
+          console.error(`[Campaign Queue] Error sending template message:`, error);
+          
+
+          if (error.response?.data) {
+            console.error('[Campaign Queue] WhatsApp API Error Response:', JSON.stringify(error.response.data, null, 2));
+          }
+          
+
+          console.error('[Campaign Queue] Failed template payload:', JSON.stringify({
+            templateName: templateData.whatsappTemplateName,
+            language: templateData.whatsappTemplateLanguage || 'en',
+            recipientPhone: recipientData.phone,
+            componentsCount: components.length,
+            hasMediaComponent: components.some((c: any) => c.type === 'header'),
+            components: components
+          }, null, 2));
+          
+
+          const errorMessage = error.message || '';
+          const errorDetails = error.response?.data?.error?.error_data?.details || '';
+          
+          if (errorMessage.includes('#132012') || errorDetails.includes('Format mismatch')) {
+
+            console.error('\n❌ MEDIA HEADER MISSING ERROR DETECTED ❌');
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.error(`Template "${templateData.whatsappTemplateName}" requires media in the header.`);
+            console.error('\nCurrent configuration:');
+            console.error(`  - Template ID: ${templateData.id}`);
+            console.error(`  - Media URLs in template: ${(templateData.mediaUrls as string[])?.length || 0}`);
+            console.error(`  - Media handle: ${templateData.mediaHandle || 'Not configured'}`);
+            console.error(`  - Campaign media URLs: ${(campaignData.mediaUrls as string[])?.length || 0}`);
+            console.error('\n📝 HOW TO FIX:');
+            console.error('1. Upload media to WhatsApp and get media handle:');
+            console.error('   https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media');
+            console.error('\n2. Update your template with media handle:');
+            console.error(`   UPDATE campaign_templates SET media_handle = 'YOUR_MEDIA_ID' WHERE id = ${templateData.id};`);
+            console.error('\nOR add media URL to template:');
+            console.error(`   UPDATE campaign_templates SET media_urls = '["https://your-domain.com/image.jpg"]'::jsonb WHERE id = ${templateData.id};`);
+            console.error('\nOR add media to campaign:');
+            console.error(`   UPDATE campaigns SET media_urls = '["https://your-domain.com/image.jpg"]'::jsonb WHERE id = ${queueItem.campaign_id};`);
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+            
+
+            throw new Error(
+              `Template "${templateData.whatsappTemplateName}" requires media header but none configured. ` +
+              `Please add media_handle or media_urls to template ID ${templateData.id} or add media to campaign ${queueItem.campaign_id}. ` +
+              `See logs above for detailed instructions.`
+            );
+          }
+          
+          throw error;
+        }
+      }
+
+
 
 
       let personalizedContent = await this.campaignService.personalizeMessage(
@@ -920,7 +1353,7 @@ export class CampaignQueueService {
         recipient_name: recipientData.name || ''
       };
 
-      await db.update(campaignQueue)
+      await getDb().update(campaignQueue)
         .set({ metadata: updatedMetadata })
         .where(eq(campaignQueue.id, queueItem.id));
 
@@ -954,13 +1387,14 @@ export class CampaignQueueService {
               channelConnection.id,
               channelConnection.userId,
               channelConnection.companyId,
-              recipientData.phone || '',
+              normalizePhoneToE164(recipientData.phone || ''),
               mediaType,
               mediaUrl,
               personalizedContent,
               undefined,
               undefined,
-              true // isFromBot = true for campaign messages
+              true, // isFromBot = true for campaign messages
+              true  // skipBroadcast - avoid duplicate client updates
             );
           } else {
             throw new Error(`Unsupported channel type: ${channelConnection.channelType}`);
@@ -986,7 +1420,7 @@ export class CampaignQueueService {
               channelConnection.id,
               channelConnection.userId,
               channelConnection.companyId,
-              recipientData.phone || '',
+              normalizePhoneToE164(recipientData.phone || ''),
               personalizedContent
             );
           }
@@ -1008,7 +1442,7 @@ export class CampaignQueueService {
             channelConnection.id,
             channelConnection.userId,
             channelConnection.companyId,
-            recipientData.phone || '',
+            normalizePhoneToE164(recipientData.phone || ''),
             personalizedContent
           );
         } else {
@@ -1018,7 +1452,7 @@ export class CampaignQueueService {
 
 
       
-      await db.update(campaignQueue)
+      await getDb().update(campaignQueue)
         .set({
           status: 'completed',
           completedAt: new Date()
@@ -1026,7 +1460,7 @@ export class CampaignQueueService {
         .where(eq(campaignQueue.id, queueItem.id));
 
       
-      await db.update(campaignRecipients)
+      await getDb().update(campaignRecipients)
         .set({
           status: 'sent',
           sentAt: new Date()
@@ -1074,7 +1508,7 @@ export class CampaignQueueService {
     try {
       if (recipientIds.length === 0) return [];
 
-      const recipients = await db.select({
+      const recipients = await getDb().select({
         id: campaignRecipients.id,
         contactId: campaignRecipients.contactId,
         variables: campaignRecipients.variables,
@@ -1107,7 +1541,7 @@ export class CampaignQueueService {
     try {
       if (itemIds.length === 0) return;
 
-      await db.update(campaignQueue)
+      await getDb().update(campaignQueue)
         .set({
           status: 'failed',
           errorMessage: errorMessage,
@@ -1135,7 +1569,7 @@ export class CampaignQueueService {
 
       if (attempts >= maxAttempts) {
         
-        await db.update(campaignQueue)
+        await getDb().update(campaignQueue)
           .set({
             status: 'failed',
             errorMessage: errorMessage,
@@ -1145,7 +1579,7 @@ export class CampaignQueueService {
           .where(eq(campaignQueue.id, queueItem.id));
 
         
-        await db.update(campaignRecipients)
+        await getDb().update(campaignRecipients)
           .set({
             status: 'failed',
             failedAt: new Date(),
@@ -1157,7 +1591,7 @@ export class CampaignQueueService {
         await this.updateCampaignStatistics(queueItem.campaign_id);
 
         
-        const [campaignData] = await db.select({
+        const [campaignData] = await getDb().select({
           id: campaigns.id,
           name: campaigns.name,
           companyId: campaigns.companyId
@@ -1186,7 +1620,7 @@ export class CampaignQueueService {
         const retryDelay = Math.pow(2, attempts) * 60000; 
         const retryTime = new Date(Date.now() + retryDelay);
 
-        await db.update(campaignQueue)
+        await getDb().update(campaignQueue)
           .set({
             status: 'pending',
             scheduledFor: retryTime,
@@ -1269,9 +1703,15 @@ export class CampaignQueueService {
   
 
   private async recordAnalyticsSnapshots(): Promise<void> {
+
+    if (!this.isGlobalProcessing || !CampaignQueueService.globalProcessingEnabled) {
+
+      return;
+    }
+
     try {
       
-      const runningCampaigns = await db.select()
+      const runningCampaigns = await getDb().select()
         .from(campaigns)
         .where(eq(campaigns.status, 'running'));
 
@@ -1289,15 +1729,21 @@ export class CampaignQueueService {
   }
 
   public async checkCampaignCompletion(): Promise<void> {
+
+    if (!this.isGlobalProcessing || !CampaignQueueService.globalProcessingEnabled) {
+
+      return;
+    }
+
     try {
       
-      const potentiallyCompletedCampaigns = await db.select()
+      const potentiallyCompletedCampaigns = await getDb().select()
         .from(campaigns)
         .where(eq(campaigns.status, 'running'));
       for (const campaign of potentiallyCompletedCampaigns) {
         try {
           
-          const queueStats = await db.select({
+          const queueStats = await getDb().select({
             total: sql`COUNT(*)`,
             pending: sql`COUNT(*) FILTER (WHERE status = 'pending')`,
             processing: sql`COUNT(*) FILTER (WHERE status = 'processing')`,
@@ -1325,7 +1771,7 @@ export class CampaignQueueService {
 
           if (totalItems > 0 && activePendingItems === 0) {
             
-            await db.update(campaigns)
+            await getDb().update(campaigns)
               .set({
                 status: 'completed',
                 completedAt: new Date()
@@ -1363,7 +1809,7 @@ export class CampaignQueueService {
 
   public async getQueueStats(companyId: number): Promise<CampaignStats> {
     try {
-      const stats = await db.select({
+      const stats = await getDb().select({
         total: sql`COUNT(*)`,
         pending: sql`COUNT(*) FILTER (WHERE status = 'pending')`,
         processing: sql`COUNT(*) FILTER (WHERE status = 'processing')`,
@@ -1408,7 +1854,7 @@ export class CampaignQueueService {
       cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
 
-      const companyCampaigns = await db.select({ id: campaigns.id })
+      const companyCampaigns = await getDb().select({ id: campaigns.id })
         .from(campaigns)
         .where(eq(campaigns.companyId, companyId));
 
@@ -1418,7 +1864,7 @@ export class CampaignQueueService {
         return 0;
       }
 
-      const result = await db.delete(campaignQueue)
+      const result = await getDb().delete(campaignQueue)
         .where(and(
           eq(campaignQueue.status, 'failed'),
           inArray(campaignQueue.campaignId, campaignIds),
@@ -1434,7 +1880,7 @@ export class CampaignQueueService {
   public async pauseCampaignQueue(campaignId: number): Promise<void> {
     try {
 
-      await db.update(campaigns)
+      await getDb().update(campaigns)
         .set({
           status: 'paused',
           pausedAt: new Date()
@@ -1449,7 +1895,7 @@ export class CampaignQueueService {
   public async resumeCampaignQueue(campaignId: number): Promise<void> {
     try {
 
-      await db.update(campaigns)
+      await getDb().update(campaigns)
         .set({
           status: 'running',
           pausedAt: null
@@ -1464,7 +1910,7 @@ export class CampaignQueueService {
   public async cancelCampaignQueue(campaignId: number): Promise<void> {
     try {
 
-      await db.update(campaignQueue)
+      await getDb().update(campaignQueue)
         .set({
           status: 'cancelled'
         })
@@ -1474,7 +1920,7 @@ export class CampaignQueueService {
         ));
 
 
-      await db.update(campaigns)
+      await getDb().update(campaigns)
         .set({
           status: 'cancelled'
         })
@@ -1492,7 +1938,7 @@ export class CampaignQueueService {
   private async updateCampaignStatistics(campaignId: number): Promise<void> {
     try {
       
-      const recipientStats = await db.select({
+      const recipientStats = await getDb().select({
         total: sql`COUNT(*)`,
         sent: sql`COUNT(*) FILTER (WHERE status IN ('sent', 'delivered', 'read'))`,
         failed: sql`COUNT(*) FILTER (WHERE status = 'failed')`,
@@ -1508,7 +1954,7 @@ export class CampaignQueueService {
       const processedRecipients = successfulSends + failedSends;
 
       
-      await db.update(campaigns)
+      await getDb().update(campaigns)
         .set({
           totalRecipients,
           processedRecipients,
@@ -1536,7 +1982,7 @@ export class CampaignQueueService {
   }> {
     try {
       
-      const [campaign] = await db.select({
+      const [campaign] = await getDb().select({
         totalRecipients: campaigns.totalRecipients,
         processedRecipients: campaigns.processedRecipients,
         successfulSends: campaigns.successfulSends,
@@ -1590,9 +2036,16 @@ export class CampaignQueueService {
    * NEW: Concurrent queue processing method
    */
   private async processConcurrentQueue(): Promise<void> {
+
+    if (!this.isGlobalProcessing || !CampaignQueueService.globalProcessingEnabled) {
+
+      return;
+    }
+
     try {
 
-      const queueItems = await db.select({
+
+      const queueItems = await getDb().select({
         id: campaignQueue.id,
         campaign_id: campaignQueue.campaignId,
         recipient_id: campaignQueue.recipientId,
@@ -1614,6 +2067,8 @@ export class CampaignQueueService {
       ))
       .orderBy(asc(campaignQueue.priority), asc(campaignQueue.scheduledFor))
       .limit(100); // Increased limit for concurrent processing
+
+
 
       if (queueItems.length === 0) {
         return;
@@ -1657,31 +2112,40 @@ export class CampaignQueueService {
     const itemsByConnection = new Map<number, QueueItem[]>();
 
 
-    const campaignIds = Array.from(new Set(queueItems.map(item => item.campaign_id)));
-    const campaignConnections = new Map<number, number>();
-
-
-    for (const campaignId of campaignIds) {
-      try {
-        const connection = await this.getCampaignChannelConnection(campaignId);
-        if (connection) {
-          campaignConnections.set(campaignId, connection.id);
-        }
-      } catch (error) {
-        console.error(`Error getting connection for campaign ${campaignId}:`, error);
-      }
-    }
 
 
     for (const item of queueItems) {
-      const connectionId = campaignConnections.get(item.campaign_id);
-      if (connectionId) {
+      if (item.account_id) {
+
+        const connectionId = item.account_id;
+
+
         if (!itemsByConnection.has(connectionId)) {
           itemsByConnection.set(connectionId, []);
         }
         itemsByConnection.get(connectionId)!.push(item);
+      } else {
+
+
+        try {
+          const connection = await this.getCampaignChannelConnection(item.campaign_id);
+          if (connection) {
+            const connectionId = connection.id;
+
+
+            if (!itemsByConnection.has(connectionId)) {
+              itemsByConnection.set(connectionId, []);
+            }
+            itemsByConnection.get(connectionId)!.push(item);
+          } else {
+            console.error(`[Campaign Queue] No connection found for campaign ${item.campaign_id}`);
+          }
+        } catch (error) {
+          console.error(`[Campaign Queue] Error getting connection for campaign ${item.campaign_id}:`, error);
+        }
       }
     }
+
 
     return itemsByConnection;
   }
@@ -1692,8 +2156,10 @@ export class CampaignQueueService {
   private async processConnectionItems(connectionId: number, items: QueueItem[]): Promise<void> {
     try {
 
+
       let pool = this.connectionPools.get(connectionId);
       if (!pool) {
+
         pool = this.createConnectionPool(connectionId);
         this.connectionPools.set(connectionId, pool);
       }
@@ -1713,18 +2179,20 @@ export class CampaignQueueService {
 
       pool.isProcessing = true;
       pool.lastProcessedAt = new Date();
-      
+
+
 
 
 
       const processingPromise = this.processConnectionBatch(connectionId, items, pool);
       this.activeProcessingPromises.set(connectionId, processingPromise);
-      
+
 
       await processingPromise;
-      
+
+
     } catch (error) {
-      console.error(`Error processing connection ${connectionId}:`, error);
+      console.error(`[Campaign Queue] Error processing connection ${connectionId}:`, error);
     } finally {
 
       const pool = this.connectionPools.get(connectionId);
@@ -1799,22 +2267,26 @@ export class CampaignQueueService {
    * Process a batch of items for a specific connection
    */
   private async processConnectionBatch(
-    connectionId: number, 
-    items: QueueItem[], 
+    connectionId: number,
+    items: QueueItem[],
     pool: ConnectionProcessingPool
   ): Promise<void> {
     const BATCH_SIZE = 5; // Smaller batches for concurrent processing
-    
+
+
+
     try {
 
-      const [connection] = await db.select()
+      const [connection] = await getDb().select()
         .from(channelConnections)
         .where(eq(channelConnections.id, connectionId));
-        
+
       if (!connection || connection.status !== 'active') {
+        console.error(`[Campaign Queue] Connection ${connectionId} not available or inactive`);
         await this.markItemsAsFailed(items.map(item => item.id), 'Connection not available or inactive');
         return;
       }
+
 
 
       const recipientIds = items.map(item => item.recipient_id);
@@ -1822,19 +2294,25 @@ export class CampaignQueueService {
       const recipientMap = new Map(recipientData.map(r => [r.id, r]));
 
 
+
       for (let i = 0; i < items.length; i += BATCH_SIZE) {
         const batch = items.slice(i, i + BATCH_SIZE);
-        
+
+
         for (const item of batch) {
           try {
+
+
             const recipient = recipientMap.get(item.recipient_id);
             if (!recipient) {
+              console.error(`[Campaign Queue] Recipient ${item.recipient_id} not found`);
               await this.markItemAsFailed(item.id, 'Recipient not found');
               continue;
             }
 
 
-            await db.update(campaignQueue)
+
+            await getDb().update(campaignQueue)
               .set({
                 accountId: connectionId,
                 status: 'processing',
@@ -1946,5 +2424,114 @@ export class CampaignQueueService {
     
     const relativePath = mediaUrl.startsWith('/') ? mediaUrl.slice(1) : mediaUrl;
     return path.join(process.cwd(), relativePath);
+  }
+
+  /**
+   * Upload media to WhatsApp and get media ID
+   * This is more reliable than using direct links
+   */
+  private async uploadMediaToWhatsApp(
+    mediaUrl: string,
+    mediaType: string,
+    channelConnection: ChannelConnection
+  ): Promise<string> {
+    try {
+      const connection = await storage.getChannelConnection(channelConnection.id);
+      if (!connection) {
+        throw new Error('Channel connection not found');
+      }
+
+      const connectionData = connection.connectionData as any;
+      const accessToken = connectionData?.accessToken || connection.accessToken;
+      const phoneNumberId = connectionData?.phoneNumberId;
+
+      if (!accessToken || !phoneNumberId) {
+        throw new Error('Missing WhatsApp connection credentials');
+      }
+
+
+
+
+      const mediaResponse = await axios.get(mediaUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30000
+      });
+
+
+      const formData = new FormData();
+      formData.append('messaging_product', 'whatsapp');
+      
+      const fileExtension = this.getFileExtension(mediaUrl);
+      const contentType = mediaResponse.headers['content-type'] || this.getContentTypeFromExtension(fileExtension);
+      
+      formData.append('file', Buffer.from(mediaResponse.data), {
+        filename: `campaign_media.${fileExtension}`,
+        contentType: contentType
+      });
+
+
+      const uploadResponse = await axios.post(
+        `https://graph.facebook.com/v23.0/${phoneNumberId}/media`,
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            ...formData.getHeaders()
+          },
+          maxBodyLength: Infinity,
+          timeout: 60000
+        }
+      );
+
+      if (!uploadResponse.data?.id) {
+        throw new Error('Failed to get media ID from WhatsApp');
+      }
+
+
+      return uploadResponse.data.id;
+
+    } catch (error: any) {
+      console.error('[Campaign Queue] Failed to upload media to WhatsApp:', error.message);
+      if (error.response?.data) {
+        console.error('[Campaign Queue] WhatsApp upload error:', JSON.stringify(error.response.data, null, 2));
+      }
+      throw new Error(`Media upload failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get file extension from URL
+   */
+  private getFileExtension(url: string): string {
+    const urlLower = url.toLowerCase();
+    if (urlLower.match(/\.(jpg|jpeg)$/)) return 'jpg';
+    if (urlLower.match(/\.png$/)) return 'png';
+    if (urlLower.match(/\.gif$/)) return 'gif';
+    if (urlLower.match(/\.webp$/)) return 'webp';
+    if (urlLower.match(/\.mp4$/)) return 'mp4';
+    if (urlLower.match(/\.mov$/)) return 'mov';
+    if (urlLower.match(/\.pdf$/)) return 'pdf';
+    if (urlLower.match(/\.doc$/)) return 'doc';
+    if (urlLower.match(/\.docx$/)) return 'docx';
+    return 'jpg'; // default
+  }
+
+  /**
+   * Get content type from file extension
+   */
+  private getContentTypeFromExtension(extension: string): string {
+    const types: Record<string, string> = {
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'png': 'image/png',
+      'gif': 'image/gif',
+      'webp': 'image/webp',
+      'mp4': 'video/mp4',
+      'mov': 'video/quicktime',
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    };
+    return types[extension] || 'application/octet-stream';
   }
 }

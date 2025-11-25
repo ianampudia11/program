@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useTranslation } from '@/hooks/use-translation';
+import { useCurrency } from '@/contexts/currency-context';
 
 interface StageHeaderProps {
   stage: PipelineStage;
@@ -20,6 +21,7 @@ interface StageHeaderProps {
 
 export default function StageHeader({ stage, deals, onEditStage, onDeleteStage }: StageHeaderProps) {
   const { t } = useTranslation();
+  const { currency, formatCurrency } = useCurrency();
 
   const stageStats = useMemo(() => {
     const totalValue = deals.reduce((sum, deal) => sum + (deal.value || 0), 0);
@@ -54,12 +56,18 @@ export default function StageHeader({ stage, deals, onEditStage, onDeleteStage }
   }, [deals]);
 
   const formatValue = (value: number) => {
-    return new Intl.NumberFormat('en-US', { 
-      notation: 'compact', 
-      maximumFractionDigits: 1,
-      style: 'currency',
-      currency: 'USD'
-    }).format(value);
+
+
+    const sampleFormatted = formatCurrency(1);
+    const currencySymbol = sampleFormatted.replace(/[\d.,\s]/g, '').trim();
+    
+    if (value >= 1000000) {
+      return `${(value / 1000000).toFixed(1)}M ${currencySymbol}`;
+    }
+    if (value >= 1000) {
+      return `${(value / 1000).toFixed(1)}K ${currencySymbol}`;
+    }
+    return formatCurrency(value);
   };
 
   return (

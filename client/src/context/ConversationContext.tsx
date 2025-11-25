@@ -15,6 +15,7 @@ import { useLocation } from 'wouter';
 interface InboxSettings {
   showGroupChats: boolean;
   browserNotifications: boolean;
+  agentSignatureEnabled: boolean;
 }
 
 interface ConversationContextProps {
@@ -39,6 +40,9 @@ interface ConversationContextProps {
   browserNotifications: boolean;
   setBrowserNotifications: (enabled: boolean) => void;
   updateBrowserNotificationSetting: (enabled: boolean) => Promise<void>;
+  agentSignatureEnabled: boolean;
+  setAgentSignatureEnabled: (enabled: boolean) => void;
+  updateAgentSignatureSetting: (enabled: boolean) => Promise<void>;
   sendMessage: (conversationId: number, content: string, isBot?: boolean) => void;
   sendMediaMessage: (conversationId: number, file: File, caption?: string) => Promise<any>;
   loadMoreMessages: (conversationId: number) => Promise<void>;
@@ -289,6 +293,7 @@ export function ConversationProvider({ children }: ConversationProviderProps) {
   const [replyToMessage, setReplyToMessage] = useState<any | null>(null);
   const [showGroupChats, setShowGroupChats] = useState<boolean>(false);
   const [browserNotifications, setBrowserNotifications] = useState<boolean>(false);
+  const [agentSignatureEnabled, setAgentSignatureEnabled] = useState<boolean>(true);
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { t } = useTranslation();
@@ -563,6 +568,9 @@ export function ConversationProvider({ children }: ConversationProviderProps) {
     if (inboxSettings?.browserNotifications !== undefined) {
       setBrowserNotifications(inboxSettings.browserNotifications);
     }
+    if (inboxSettings?.agentSignatureEnabled !== undefined) {
+      setAgentSignatureEnabled(inboxSettings.agentSignatureEnabled);
+    }
   }, [inboxSettings]);
 
   const areChannelTypesCompatible = (contactChannelType: string, conversationChannelType: string): boolean => {
@@ -711,6 +719,36 @@ export function ConversationProvider({ children }: ConversationProviderProps) {
       });
     } catch (error) {
       console.error('Error updating browser notification setting:', error);
+      toast({
+        title: t('common.error', 'Error'),
+        description: t('settings.update_failed', 'Failed to update settings'),
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const updateAgentSignatureSetting = async (enabled: boolean) => {
+    try {
+      const response = await apiRequest('PATCH', '/api/settings/inbox', {
+        agentSignatureEnabled: enabled
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update inbox settings');
+      }
+
+      setAgentSignatureEnabled(enabled);
+
+      queryClient.invalidateQueries({ queryKey: ['/api/settings/inbox'] });
+
+      toast({
+        title: t('settings.updated', 'Settings Updated'),
+        description: enabled
+          ? t('settings.agent_signature_enabled', 'Agent signatures are now enabled')
+          : t('settings.agent_signature_disabled', 'Agent signatures are now disabled'),
+      });
+    } catch (error) {
+      console.error('Error updating agent signature setting:', error);
       toast({
         title: t('common.error', 'Error'),
         description: t('settings.update_failed', 'Failed to update settings'),
@@ -1567,6 +1605,9 @@ export function ConversationProvider({ children }: ConversationProviderProps) {
     browserNotifications,
     setBrowserNotifications,
     updateBrowserNotificationSetting,
+    agentSignatureEnabled,
+    setAgentSignatureEnabled,
+    updateAgentSignatureSetting,
     sendMessage,
     sendMediaMessage,
     loadMoreMessages,

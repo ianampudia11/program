@@ -4,10 +4,12 @@ import { useTranslation } from '@/hooks/use-translation';
 import { useConversations } from '@/context/ConversationContext';
 import { useBotStatus } from '@/hooks/useBotStatus';
 import MediaUploadModal from './MediaUploadModal';
+import MessageScheduler from './MessageScheduler';
 import EmojiPickerComponent from '@/components/ui/emoji-picker';
 import QuickReplyPanel from './QuickReplyPanel';
+import BusinessTemplatePanel from './BusinessTemplatePanel';
 import BotIcon from '@/components/ui/bot-icon';
-import { Mic, Pause, Play, Square, Send, Smile, X, Reply, Loader2 } from 'lucide-react';
+import { Mic, Pause, Play, Square, Send, Smile, X, Reply, Loader2, Clock } from 'lucide-react';
 import './MessageInput.css';
 import { requestMicrophoneAccess, stopMicrophoneStream } from '@/utils/microphone-permissions';
 
@@ -24,6 +26,7 @@ export default function MessageInput({ conversationId, conversation, contact }: 
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSendingVoice, setIsSendingVoice] = useState(false);
+  const [isSchedulerOpen, setIsSchedulerOpen] = useState(false);
 
   const { isBotDisabled, toggleBot, isToggling } = useBotStatus(conversationId);
 
@@ -547,6 +550,44 @@ export default function MessageInput({ conversationId, conversation, contact }: 
       }
     }
   };
+
+  const handleScheduleMessage = async (scheduledData: any) => {
+    try {
+      const response = await fetch('/api/scheduled-messages', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          conversationId,
+          content: scheduledData.content,
+          scheduledFor: scheduledData.scheduledFor.toISOString(),
+          messageType: scheduledData.messageType,
+          mediaUrl: scheduledData.mediaUrl,
+          mediaType: scheduledData.mediaType,
+          caption: scheduledData.caption,
+          timezone: scheduledData.timezone,
+          metadata: scheduledData.metadata || {}
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to schedule message');
+      }
+
+      const result = await response.json();
+      
+
+      setMessage('');
+      setSelectedFile(null);
+      
+      return result;
+    } catch (error: any) {
+      throw new Error(error.message || 'Failed to schedule message');
+    }
+  };
   
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -788,30 +829,51 @@ export default function MessageInput({ conversationId, conversation, contact }: 
             />
 
             {message.trim() ? (
-              <button
-                className={`
-                  w-10 h-10 rounded-full flex items-center justify-center
-                  send-button-transition button-scale-hover button-scale-active
-                  shadow-lg hover:shadow-xl
-                  ${isSending
-                    ? 'bg-gray-400 cursor-not-allowed'
-                    : 'send-button-gradient'
-                  }
-                  text-white focus-ring
-                  flex-shrink-0
-                  ${!isSending && message.trim() ? 'send-button-pulse' : ''}
-                `}
-                onClick={handleSendMessage}
-                disabled={isSending || !message.trim()}
-                data-tooltip={t('messages.input.send_message', 'Send message')}
-                aria-label={t('messages.input.send_message', 'Send message')}
-              >
-                {isSending ? (
-                  <Loader2 className="h-5 w-5 loading-spinner" />
-                ) : (
-                  <i className="ri-send-plane-fill text-lg transform rotate-45 transition-transform duration-200" />
-                )}
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Schedule Button */}
+                <button
+                  className={`
+                    w-10 h-10 rounded-full flex items-center justify-center
+                    transition-all duration-200 button-scale-hover
+                    shadow-md hover:shadow-lg
+                    bg-blue-600 hover:bg-blue-700
+                    text-white focus-ring
+                    flex-shrink-0
+                  `}
+                  onClick={() => setIsSchedulerOpen(true)}
+                  disabled={isSending}
+                  data-tooltip={t('messages.input.schedule_message', 'Schedule message')}
+                  aria-label={t('messages.input.schedule_message', 'Schedule message')}
+                >
+                  <Clock className="h-5 w-5" />
+                </button>
+
+                {/* Send Button */}
+                <button
+                  className={`
+                    w-10 h-10 rounded-full flex items-center justify-center
+                    send-button-transition button-scale-hover button-scale-active
+                    shadow-lg hover:shadow-xl
+                    ${isSending
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'send-button-gradient'
+                    }
+                    text-white focus-ring
+                    flex-shrink-0
+                    ${!isSending && message.trim() ? 'send-button-pulse' : ''}
+                  `}
+                  onClick={handleSendMessage}
+                  disabled={isSending || !message.trim()}
+                  data-tooltip={t('messages.input.send_message', 'Send message')}
+                  aria-label={t('messages.input.send_message', 'Send message')}
+                >
+                  {isSending ? (
+                    <Loader2 className="h-5 w-5 loading-spinner" />
+                  ) : (
+                    <i className="ri-send-plane-fill text-lg transform rotate-45 transition-transform duration-200" />
+                  )}
+                </button>
+              </div>
             ) : (
               <button
                 className={`
@@ -837,6 +899,13 @@ export default function MessageInput({ conversationId, conversation, contact }: 
                 conversation={conversation}
                 contact={contact}
               />
+              {conversation?.channelType === 'whatsapp_official' && (
+                <BusinessTemplatePanel
+                  conversationId={conversationId}
+                  conversation={conversation}
+                  contact={contact}
+                />
+              )}
               <button
                 className="p-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors duration-200"
                 onClick={handleAttachmentClick}
@@ -1012,6 +1081,16 @@ export default function MessageInput({ conversationId, conversation, contact }: 
         onClose={handleCloseMediaModal}
         file={selectedFile}
         conversationId={conversationId}
+      />
+
+      <MessageScheduler
+        isOpen={isSchedulerOpen}
+        onClose={() => setIsSchedulerOpen(false)}
+        onSchedule={handleScheduleMessage}
+        conversationId={conversationId}
+        initialContent={message}
+        messageType={selectedFile ? 'media' : 'text'}
+        mediaFile={selectedFile || undefined}
       />
 
       <EmojiPickerComponent

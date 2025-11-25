@@ -1,5 +1,5 @@
 import * as cron from 'node-cron';
-import { db } from '../db';
+import { getDb } from '../db';
 import {
   backupSchedules,
   inboxBackups,
@@ -18,15 +18,16 @@ interface ScheduledTask {
 
 class InboxBackupSchedulerService {
   private scheduledTasks: Map<number, ScheduledTask> = new Map();
+  private cleanupTask: cron.ScheduledTask | null = null;
   private readonly backupDir = path.join(process.cwd(), 'backups');
 
   constructor() {
-    this.initializeScheduler();
+
   }
 
   private async checkTableExists(tableName: string): Promise<boolean> {
     try {
-      const result = await db.execute(sql`
+      const result = await getDb().execute(sql`
         SELECT EXISTS (
           SELECT FROM information_schema.tables
           WHERE table_schema = 'public'
@@ -49,7 +50,7 @@ class InboxBackupSchedulerService {
         return;
       }
 
-      const activeSchedules = await db.select()
+      const activeSchedules = await getDb().select()
         .from(backupSchedules)
         .where(eq(backupSchedules.isActive, true));
 
@@ -58,11 +59,13 @@ class InboxBackupSchedulerService {
       }
 
 
-      cron.schedule('0 2 * * *', () => {
+
+      this.cleanupTask = cron.schedule('0 2 * * *', () => {
         this.cleanupExpiredBackups().catch(error => {
           logger.error('InboxBackupScheduler', 'Failed to cleanup expired backups:', error);
         });
       });
+      this.cleanupTask.start();
 
       logger.info('InboxBackupScheduler', `Initialized inbox backup scheduler with ${activeSchedules.length} active schedules`);
     } catch (error) {
@@ -72,7 +75,7 @@ class InboxBackupSchedulerService {
 
   async createSchedule(scheduleData: InsertBackupSchedule): Promise<number> {
     try {
-      const schedule = await db.insert(backupSchedules).values({
+      const schedule = await getDb().insert(backupSchedules).values({
         ...scheduleData,
         nextRunAt: this.calculateNextRun(scheduleData.frequency || 'daily', scheduleData.cronExpression || undefined)
       }).returning({ id: backupSchedules.id });
@@ -97,7 +100,7 @@ class InboxBackupSchedulerService {
   async updateSchedule(scheduleId: number, updates: Partial<InsertBackupSchedule>): Promise<boolean> {
     try {
 
-      await db.update(backupSchedules)
+      await getDb().update(backupSchedules)
         .set({
           ...updates,
           nextRunAt: updates.frequency || updates.cronExpression
@@ -128,7 +131,7 @@ class InboxBackupSchedulerService {
     try {
       this.unscheduleBackup(scheduleId);
       
-      await db.delete(backupSchedules)
+      await getDb().delete(backupSchedules)
         .where(eq(backupSchedules.id, scheduleId));
 
       logger.info('InboxBackupScheduler', `Deleted inbox backup schedule ${scheduleId}`);
@@ -141,7 +144,7 @@ class InboxBackupSchedulerService {
 
   async getSchedules(companyId: number) {
     try {
-      return await db.select()
+      return await getDb().select()
         .from(backupSchedules)
         .where(eq(backupSchedules.companyId, companyId))
         .orderBy(desc(backupSchedules.createdAt));
@@ -153,7 +156,7 @@ class InboxBackupSchedulerService {
 
   async getSchedule(scheduleId: number) {
     try {
-      const schedule = await db.select()
+      const schedule = await getDb().select()
         .from(backupSchedules)
         .where(eq(backupSchedules.id, scheduleId))
         .limit(1);
@@ -218,7 +221,7 @@ class InboxBackupSchedulerService {
       });
 
 
-      await db.update(backupSchedules)
+      await getDb().update(backupSchedules)
         .set({
           lastRunAt: new Date(),
           nextRunAt: this.calculateNextRun(schedule.frequency || 'daily', schedule.cronExpression || undefined),
@@ -266,7 +269,7 @@ class InboxBackupSchedulerService {
       logger.info('InboxBackupScheduler', 'Starting cleanup of expired inbox backups');
 
 
-      const schedules = await db.select()
+      const schedules = await getDb().select()
         .from(backupSchedules)
         .where(eq(backupSchedules.isActive, true));
 
@@ -276,7 +279,7 @@ class InboxBackupSchedulerService {
           cutoffDate.setDate(cutoffDate.getDate() - schedule.retentionDays);
 
 
-          const expiredBackups = await db.select()
+          const expiredBackups = await getDb().select()
             .from(inboxBackups)
             .where(and(
               eq(inboxBackups.companyId, schedule.companyId),
@@ -297,7 +300,7 @@ class InboxBackupSchedulerService {
               }
 
 
-              await db.delete(inboxBackups)
+              await getDb().delete(inboxBackups)
                 .where(eq(inboxBackups.id, backup.id));
 
               logger.info('InboxBackupScheduler', `Cleaned up expired inbox backup: ${backup.name} (${backup.id})`);
@@ -319,6 +322,42 @@ class InboxBackupSchedulerService {
       activeSchedules: this.scheduledTasks.size,
       scheduledTasks: Array.from(this.scheduledTasks.keys())
     };
+  }
+
+  /**
+   * Stop all scheduled tasks
+   * Used during maintenance operations
+   */
+  async stopAll(): Promise<void> {
+    logger.info('InboxBackupScheduler', 'Stopping all scheduled tasks...');
+    
+
+    for (const [scheduleId, scheduledTask] of this.scheduledTasks.entries()) {
+      scheduledTask.task.stop();
+      scheduledTask.task.destroy();
+      logger.info('InboxBackupScheduler', `Stopped scheduled backup task: ${scheduleId}`);
+    }
+    this.scheduledTasks.clear();
+
+
+    if (this.cleanupTask) {
+      this.cleanupTask.stop();
+      this.cleanupTask.destroy();
+      this.cleanupTask = null;
+      logger.info('InboxBackupScheduler', 'Stopped cleanup task');
+    }
+
+    logger.info('InboxBackupScheduler', 'All scheduled tasks stopped');
+  }
+
+  /**
+   * Start all scheduled tasks
+   * Used after maintenance operations
+   */
+  async startAll(): Promise<void> {
+    logger.info('InboxBackupScheduler', 'Starting all scheduled tasks...');
+    await this.initializeScheduler();
+    logger.info('InboxBackupScheduler', 'All scheduled tasks started');
   }
 }
 

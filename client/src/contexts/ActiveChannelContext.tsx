@@ -149,6 +149,8 @@ export function useChannelInfo() {
         return 'Telegram';
       case 'email':
         return 'Email';
+      case 'webchat':
+        return 'WebChat';
       default:
         return channelType;
     }
@@ -169,8 +171,10 @@ export function useChannelInfo() {
         return <i className="ri-telegram-line" style={{ color: '#0088CC' }} />;
       case 'email':
         return <i className="ri-mail-line" style={{ color: '#6B7280' }} />;
+      case 'webchat':
+        return <i className="ri-message-3-line" style={{ color: '#6366f1' }} />;
       default:
-        return <i className="ri-chat-1-line" style={{ color: '#333235' }} />;
+        return <i className="ri-message-3-line" style={{ color: '#333235' }} />;
     }
   };
 

@@ -3805,7 +3805,7 @@
     },
     {
         "key": "admin.backup.upload.file_help",
-        "value": "Tamaño máximo de archivo: 500MB. Formatos compatibles: .sql, .backup, .dump, .bak"
+        "value": "Tamaño máximo de archivo: 3000MB. Formatos compatibles: .sql, .backup, .dump, .bak"
     },
     {
         "key": "admin.backup.upload.description_label",
@@ -9631,7 +9631,7 @@
     },
     {
         "key": "flow_builder.ai_calendar_system_prompt_note",
-        "value": "Nota: El comportamiento del calendario se controla mediante el prompt del sistema principal anterior."
+        "value": "El comportamiento principal del calendario se aplica cuando está habilitado. El prompt personaliza el tono y la orientación adicional."
     },
     {
         "key": "flow_builder.ai_business_hours_start",
@@ -13464,5 +13464,153 @@
     {
         "key": "api.access.success.copied",
         "value": "Clave API copiada al portapapeles"
+    },
+    {
+        "key": "ai_assistant.audio_capability_process",
+        "value": "procesar y comprender mensajes de voz/archivos de audio"
+    },
+    {
+        "key": "ai_assistant.audio_capability_generate",
+        "value": "generar respuestas de voz usando tecnología de texto a voz de {{provider}}"
+    },
+    {
+        "key": "ai_assistant.voice_mode_always_prompt",
+        "value": "Responderás con mensajes de texto y voz para todas las interacciones."
+    },
+    {
+        "key": "ai_assistant.voice_mode_voice_only_prompt",
+        "value": "Responderás con mensajes de voz solo cuando el usuario te envíe un mensaje de voz."
+    },
+    {
+        "key": "ai_assistant.voice_mode_never_prompt",
+        "value": "Solo responderás con mensajes de texto."
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_title",
+        "value": "CAPACIDADES DE PROCESAMIENTO DE AUDIO:"
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_intro",
+        "value": "Tienes capacidades avanzadas de procesamiento de audio y puedes {{capabilities}}"
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_important",
+        "value": "PAUTAS IMPORTANTES DE AUDIO:"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_can_process",
+        "value": "PUEDES procesar mensajes de voz y archivos de audio que los usuarios te envíen"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_acknowledge",
+        "value": "Cuando los usuarios envíen mensajes de voz, reconoce que recibiste y entendiste su mensaje de audio"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_understand",
+        "value": "Puedes entender el habla, transcribir contenido de audio y responder apropiadamente a entradas de voz"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_limit",
+        "value": "Los mensajes de audio están limitados a {{maxDuration}} segundos para eficiencia de procesamiento"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_never_claim",
+        "value": "Nunca digas que no puedes procesar mensajes de voz o archivos de audio - tienes capacidades completas de procesamiento de audio"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_natural",
+        "value": "Responde naturalmente a los mensajes de voz como lo harías con cualquier mensaje de texto"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_conversational",
+        "value": "Sé conversacional. Y no le digas al usuario que tienes la capacidad de procesamiento de voz, etc., solo responde a su solicitud directamente."
+    },
+    {
+        "key": "ai_assistant.error_transcription_failed",
+        "value": "Falló la transcripción de audio: {{error}}"
+    },
+    {
+        "key": "ai_assistant.error_speech_generation_failed",
+        "value": "Falló la generación de voz: {{error}}"
+    },
+    {
+        "key": "ai_assistant.error_no_api_key",
+        "value": "No hay clave API disponible para el proveedor {{provider}}. Por favor configure las credenciales en el panel de administración o proporcione una clave API en la configuración del nodo."
+    },
+    {
+        "key": "ai_assistant.error_audio_file_not_found",
+        "value": "Archivo de audio no encontrado: {{path}}"
+    },
+    {
+        "key": "ai_assistant.audio_too_long_warning",
+        "value": "Tu mensaje de audio es demasiado largo para procesar. Por favor envía un mensaje más corto (menos de {{maxDuration}} segundos) o escribe tu mensaje en su lugar."
+    },
+    {
+        "key": "ai_assistant.voice_message_transcription_failed",
+        "value": "Mensaje de voz (transcripción fallida)"
+    },
+    {
+        "key": "ai_assistant.voice_message_transcription_error",
+        "value": "Mensaje de voz (transcripción fallida: {{error}})"
+    },
+    {
+        "key": "ai_assistant.knowledge_base_context_template",
+        "value": "Basándose en la siguiente información de la base de conocimientos:\n\n{{context}}\n\nPor favor responda la pregunta del usuario usando esta información cuando sea relevante."
+    },
+    {
+        "key": "ai_assistant.knowledge_base_document_label",
+        "value": "[Documento: {{name}}] (Relevancia: {{similarity}}%)"
+    },
+    {
+        "key": "ai_assistant.function_calling_rules_title",
+        "value": "REGLAS IMPORTANTES DE LLAMADA DE FUNCIONES:"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_explicit",
+        "value": "Solo llama funciones cuando el usuario solicite explícitamente la acción específica"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_no_greetings",
+        "value": "NO llames funciones para saludos generales, preguntas o conversación casual"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_clear_intent",
+        "value": "NO llames funciones a menos que haya una intención clara e inequívoca del usuario"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_greeting_examples",
+        "value": "Para saludos como \"Hola\", \"Hola\", \"¿Cómo estás?\" - responde normalmente sin llamar ninguna función"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_specific",
+        "value": "Solo usa funciones cuando el usuario específicamente pida algo que coincida con el propósito de la función"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_conservative",
+        "value": "Sé conservador - cuando tengas dudas, responde normalmente sin llamar funciones"
+    },
+    {
+        "key": "ai_assistant.respond_in_language",
+        "value": "Responde en {{language}}."
+    },
+    {
+        "key": "ai_assistant.default_system_prompt",
+        "value": "Eres un asistente útil. Responde las preguntas de los usuarios de manera concisa y precisa. Solo realiza acciones específicas cuando el usuario las solicite explícitamente."
+    },
+    {
+        "key": "flow_builder.ai_language_label",
+        "value": "Idioma de Respuesta"
+    },
+    {
+        "key": "flow_builder.ai_language_description",
+        "value": "Seleccione el idioma que el asistente de IA debe usar para las respuestas"
+    },
+    {
+        "key": "flow_builder.ai_language_placeholder",
+        "value": "Seleccionar idioma..."
+    },
+    {
+        "key": "flow_builder.ai_default_system_prompt",
+        "value": "Eres un asistente útil. Responde las preguntas de los usuarios de manera concisa y precisa. Solo realiza acciones específicas cuando el usuario las solicite explícitamente."
     }
 ]

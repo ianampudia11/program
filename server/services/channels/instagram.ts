@@ -17,7 +17,6 @@ interface InstagramAccountInfo {
   profile_picture_url: string;
   followers_count: number;
 }
-
 interface InstagramConnectionData {
   instagramAccountId?: string;
   accountInfo?: InstagramAccountInfo;
@@ -46,10 +45,11 @@ interface ChannelConnection {
   id: number;
   userId: number;
   companyId: number;
+  accountName?: string | null;
   accessToken?: string | null;
   connectionData?: InstagramConnectionData | Record<string, any> | null;
   channelType: 'instagram' | string;
-  status: 'connected' | 'disconnected' | 'error' | 'pending' | string;
+  status: 'active' | 'inactive' | 'error' | 'connected' | 'disconnected' | 'pending' | string;
 }
 
 type Contact = ReturnType<typeof storage.createContact> extends Promise<infer T> ? T : any;
@@ -108,6 +108,19 @@ interface InstagramWebhookEntry {
   id: string;
   time: number;
   messaging?: InstagramWebhookMessagingEvent[];
+  changes?: Array<{
+    field: string;
+    value: {
+      sender: { id: string };
+      recipient: { id: string };
+      timestamp: string | number;
+      message: {
+        mid: string;
+        text: string;
+        is_echo?: boolean;
+      };
+    };
+  }>;
 }
 
 interface InstagramWebhookBody {
@@ -127,6 +140,7 @@ interface ConnectionStatusUpdatePayload {
 interface ConnectionErrorPayload {
   connectionId: number;
   error: string;
+  requiresReauth?: boolean;
 }
 
 interface MessageReceivedPayload {
@@ -168,10 +182,34 @@ interface ConnectionState {
   errorCount: number;
   lastError: string | null;
   accountInfo: any | null;
+  consecutiveFailures: number;
+  lastSuccessfulValidation: Date | null;
+  isRecovering: boolean;
+  recoveryAttempts: number;
+  lastRecoveryAttempt: Date | null;
 }
+
+
+const HEALTH_CHECK_INTERVALS = {
+  ACTIVE: 120000, // 2 minutes
+  INACTIVE: 300000, // 5 minutes
+  ERROR: 60000, // 1 minute
+  RECOVERY: 30000 // 30 seconds
+};
+
+
+const ACTIVITY_THRESHOLDS = {
+  INACTIVE_TIMEOUT: 600000, // 10 minutes
+  ACTIVE_THRESHOLD: 300000, // 5 minutes
+  TOKEN_VALIDATION_INTERVAL: 3600000, // 1 hour
+  MAX_RECOVERY_ATTEMPTS: 3,
+  RECOVERY_BACKOFF_BASE: 30000 // 30 seconds
+};
 
 const activeConnections = new Map<number, boolean>();
 const connectionStates = new Map<number, ConnectionState>();
+const healthMonitoringIntervals = new Map<number, NodeJS.Timeout>();
+const recoveryTimeouts = new Map<number, NodeJS.Timeout>();
 const eventEmitter = new EventEmitter();
 
 
@@ -192,6 +230,11 @@ function getConnectionState(connectionId: number): ConnectionState {
       errorCount: 0,
       lastError: null,
       accountInfo: null
+      ,consecutiveFailures: 0
+      ,lastSuccessfulValidation: null
+      ,isRecovering: false
+      ,recoveryAttempts: 0
+      ,lastRecoveryAttempt: null
     });
   }
   return connectionStates.get(connectionId)!;
@@ -200,16 +243,280 @@ function getConnectionState(connectionId: number): ConnectionState {
 /**
  * Update connection activity
  */
-function updateConnectionActivity(connectionId: number, success: boolean = true, error?: string) {
+export function updateConnectionActivity(connectionId: number, success: boolean = true, error?: string) {
   const state = getConnectionState(connectionId);
   state.lastActivity = new Date();
 
   if (success) {
     state.errorCount = 0;
+    state.consecutiveFailures = 0;
     state.lastError = null;
+    state.isActive = true;
+    state.lastSuccessfulValidation = new Date();
+
+    if (state.isRecovering) {
+      state.isRecovering = false;
+      state.recoveryAttempts = 0;
+      state.lastRecoveryAttempt = null;
+      logger.info('instagram', `Connection ${connectionId} recovered successfully`);
+
+      const recoveryTimeout = recoveryTimeouts.get(connectionId);
+      if (recoveryTimeout) {
+        clearTimeout(recoveryTimeout);
+        recoveryTimeouts.delete(connectionId);
+      }
+    }
   } else {
     state.errorCount++;
+    state.consecutiveFailures++;
     state.lastError = error || 'Unknown error';
+
+    if (state.consecutiveFailures >= 3 && !state.isRecovering) {
+
+      initiateConnectionRecovery(connectionId);
+    }
+  }
+}
+
+
+async function validateTokenHealth(connectionId: number): Promise<boolean> {
+  try {
+    const connection = await storage.getChannelConnection(connectionId) as ChannelConnection | null;
+    if (!connection) return false;
+
+    const connectionData = connection.connectionData as InstagramConnectionData | undefined;
+    const accessToken = connection.accessToken;
+    const instagramAccountId = connectionData?.instagramAccountId;
+
+    if (!accessToken || !instagramAccountId) return false;
+
+    const response = await axios.get(
+      `${INSTAGRAM_GRAPH_URL}/${INSTAGRAM_API_VERSION}/${instagramAccountId}`,
+      {
+        params: { fields: 'id,username' },
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+        timeout: 10000
+      }
+    );
+
+    if (response.status === 200) {
+      updateConnectionActivity(connectionId, true);
+      logger.debug('instagram', `Token validation successful for connection ${connectionId}`);
+      return true;
+    }
+
+    return false;
+  } catch (error: any) {
+    logger.warn('instagram', `Token validation failed for connection ${connectionId}:`, error?.message || error);
+
+    const status = error?.response?.status;
+    const graphErrorCode = error?.response?.data?.error?.code;
+
+    if (status === 401 || status === 403 || (status === 400 && graphErrorCode === 190)) {
+      await handleTokenExpiration(connectionId);
+    } else {
+      updateConnectionActivity(connectionId, false, error?.message || String(error));
+    }
+
+    return false;
+  }
+}
+
+async function handleTokenExpiration(connectionId: number): Promise<void> {
+  try {
+    await storage.updateChannelConnectionStatus(connectionId, 'error');
+    const state = getConnectionState(connectionId);
+    state.lastError = 'Access token expired or invalid';
+    state.isActive = false;
+
+    eventEmitter.emit('connectionError', { connectionId, error: 'Access token expired or invalid', requiresReauth: true } as ConnectionErrorPayload);
+    logger.error('instagram', `Access token expired for connection ${connectionId}`);
+  } catch (error: any) {
+    logger.error('instagram', `Error handling token expiration for connection ${connectionId}:`, error);
+  }
+}
+
+async function initiateConnectionRecovery(connectionId: number): Promise<void> {
+  const state = getConnectionState(connectionId);
+
+
+  if (state.isRecovering) return;
+
+
+  if ((state.recoveryAttempts || 0) >= ACTIVITY_THRESHOLDS.MAX_RECOVERY_ATTEMPTS) {
+    logger.error('instagram', `Max recovery attempts reached for connection ${connectionId}`);
+    try {
+      await storage.updateChannelConnectionStatus(connectionId, 'error');
+    } catch (err) {
+      logger.error('instagram', `Failed to mark connection ${connectionId} as error:`, err);
+    }
+    return;
+  }
+
+
+  state.isRecovering = true;
+  state.recoveryAttempts = (state.recoveryAttempts || 0) + 1;
+  state.lastRecoveryAttempt = new Date();
+  logger.info('instagram', `Initiating recovery for connection ${connectionId} (attempt ${state.recoveryAttempts})`);
+
+
+  const backoffDelay = ACTIVITY_THRESHOLDS.RECOVERY_BACKOFF_BASE * Math.pow(2, (state.recoveryAttempts || 1) - 1);
+
+
+  const recoveryTimeout = setTimeout(async () => {
+    try {
+      const success = await validateTokenHealth(connectionId);
+
+      if (success) {
+        logger.info('instagram', `Recovery succeeded for connection ${connectionId}`);
+
+      } else {
+
+        if ((state.recoveryAttempts || 0) < ACTIVITY_THRESHOLDS.MAX_RECOVERY_ATTEMPTS) {
+          logger.info('instagram', `Recovery attempt ${state.recoveryAttempts} failed for connection ${connectionId}, scheduling retry`);
+
+
+          const prev = recoveryTimeouts.get(connectionId);
+          if (prev) {
+            clearTimeout(prev);
+            recoveryTimeouts.delete(connectionId);
+          }
+
+          const retryTimeout = setTimeout(async () => {
+
+            recoveryTimeouts.delete(connectionId);
+            try {
+              const latestState = getConnectionState(connectionId);
+
+              if (latestState.isRecovering) return;
+              if ((latestState.consecutiveFailures || 0) < 3) return;
+
+              const conn = await storage.getChannelConnection(connectionId) as ChannelConnection | null;
+              if (!conn) return;
+
+              if (conn.status === 'error' || conn.status === 'disconnected' || conn.status === 'inactive' || !activeConnections.has(connectionId)) return;
+
+
+              await initiateConnectionRecovery(connectionId);
+            } catch (e) {
+              logger.error('instagram', `Error running scheduled recovery retry for ${connectionId}:`, e);
+            }
+          }, backoffDelay) as unknown as NodeJS.Timeout;
+
+          recoveryTimeouts.set(connectionId, retryTimeout);
+        } else {
+
+          state.isRecovering = false;
+          try {
+            await storage.updateChannelConnectionStatus(connectionId, 'error');
+          } catch (err) {
+            logger.error('instagram', `Failed to mark connection ${connectionId} as error after recovery attempts:`, err);
+          }
+          logger.error('instagram', `Recovery failed for connection ${connectionId} after ${state.recoveryAttempts} attempts`);
+        }
+      }
+    } catch (err) {
+      logger.error('instagram', `Error during recovery attempt for connection ${connectionId}:`, err);
+      state.isRecovering = false;
+    } finally {
+      recoveryTimeouts.delete(connectionId);
+    }
+  }, backoffDelay);
+
+  recoveryTimeouts.set(connectionId, recoveryTimeout as unknown as NodeJS.Timeout);
+}
+
+/**
+ * Determine adaptive health check interval based on connection state
+ */
+function getAdaptiveHealthCheckInterval(state: ConnectionState): number {
+  if (state.isRecovering) return HEALTH_CHECK_INTERVALS.RECOVERY;
+  if (state.errorCount > 0) return HEALTH_CHECK_INTERVALS.ERROR;
+  if (state.isActive) return HEALTH_CHECK_INTERVALS.ACTIVE;
+  return HEALTH_CHECK_INTERVALS.INACTIVE;
+}
+
+/**
+ * Stop health monitoring and clear timers for a connection
+ */
+function stopHealthMonitoring(connectionId: number) {
+  const interval = healthMonitoringIntervals.get(connectionId);
+  if (interval) {
+    clearTimeout(interval);
+    healthMonitoringIntervals.delete(connectionId);
+  }
+
+  const recovery = recoveryTimeouts.get(connectionId);
+  if (recovery) {
+    clearTimeout(recovery);
+    recoveryTimeouts.delete(connectionId);
+  }
+}
+
+/**
+ * Start health monitoring loop for a connection
+ */
+function startHealthMonitoring(connectionId: number) {
+  stopHealthMonitoring(connectionId);
+
+  const performHealthCheck = async () => {
+    try {
+      const connection = await storage.getChannelConnection(connectionId) as ChannelConnection | null;
+      if (!connection) {
+        stopHealthMonitoring(connectionId);
+        return;
+      }
+
+      const state = getConnectionState(connectionId);
+
+      let validated = true;
+      const timeSinceValidation = state.lastSuccessfulValidation ? (Date.now() - state.lastSuccessfulValidation.getTime()) : Infinity;
+      if (timeSinceValidation > ACTIVITY_THRESHOLDS.TOKEN_VALIDATION_INTERVAL) {
+
+        validated = await validateTokenHealth(connectionId);
+      }
+
+
+      if (validated && !state.isActive && connection.status !== 'error') {
+        state.isActive = true;
+        await storage.updateChannelConnectionStatus(connectionId, 'active');
+        eventEmitter.emit('connectionStatusUpdate', { connectionId, status: 'active' });
+        logger.info('instagram', `Connection ${connectionId} marked active`);
+      }
+
+      const nextInterval = getAdaptiveHealthCheckInterval(state);
+      const timeout = setTimeout(performHealthCheck, nextInterval);
+      healthMonitoringIntervals.set(connectionId, timeout);
+    } catch (error: any) {
+      logger.error('instagram', 'Health check error for connection ' + connectionId + ':', error);
+      updateConnectionActivity(connectionId, false, error?.message || String(error));
+
+      const timeout = setTimeout(performHealthCheck, HEALTH_CHECK_INTERVALS.ERROR);
+      healthMonitoringIntervals.set(connectionId, timeout);
+    }
+  };
+
+
+  performHealthCheck();
+}
+
+/**
+ * Initialize health monitoring for all active Instagram connections.
+ * This should be called when the server starts.
+ */
+export async function initializeHealthMonitoring(): Promise<void> {
+  try {
+    const connections = await storage.getChannelConnectionsByType('instagram');
+    for (const conn of connections) {
+      if (conn.status === 'active' || conn.status === 'connected') {
+        activeConnections.set(conn.id, true);
+        updateConnectionActivity(conn.id, true);
+        startHealthMonitoring(conn.id);
+        logger.info('instagram', `Started health monitoring for connection ${conn.id}`);
+      }
+    }
+  } catch (error: any) {
+    logger.error('instagram', 'Error initializing health monitoring:', error);
   }
 }
 
@@ -452,7 +759,7 @@ export async function connectToInstagram(connectionId: number, userId: number, c
     }
 
 
-    await storage.updateChannelConnectionStatus(connectionId, 'connected');
+  await storage.updateChannelConnectionStatus(connectionId, 'active');
 
     const updatedConnectionData: InstagramConnectionData = {
       ...(connectionData || {}),
@@ -472,7 +779,7 @@ export async function connectToInstagram(connectionId: number, userId: number, c
 
     eventEmitter.emit('connectionStatusUpdate', {
       connectionId,
-      status: 'connected',
+      status: 'active',
       accountInfo: validationResult.accountInfo
     } as ConnectionStatusUpdatePayload);
   } catch (error: unknown) {
@@ -503,15 +810,15 @@ export async function disconnectFromInstagram(connectionId: number, userId: numb
       throw new Error('Unauthorized access to channel connection');
     }
 
-    activeConnections.delete(connectionId);
-    updateConnectionActivity(connectionId, true);
-    await storage.updateChannelConnectionStatus(connectionId, 'disconnected');
+  activeConnections.delete(connectionId);
+  updateConnectionActivity(connectionId, true);
+  await storage.updateChannelConnectionStatus(connectionId, 'inactive');
 
     logger.info('instagram', `Instagram connection ${connectionId} disconnected successfully`);
 
     eventEmitter.emit('connectionStatusUpdate', {
       connectionId,
-      status: 'disconnected'
+      status: 'inactive'
     } as ConnectionStatusUpdatePayload);
 
     return true;
@@ -849,30 +1156,85 @@ export const sendMedia = sendInstagramMediaMessage;
  */
 async function verifyWebhookSignatureForAnyConnection(payload: string, signature: string): Promise<boolean> {
   try {
+    logger.debug('instagram', 'Starting signature verification for Instagram webhook', {
+      hasSignature: !!signature,
+      signaturePreview: typeof signature === 'string' && signature.indexOf('=') > 0 ? signature.split('=')[0] + '=...' : 'none',
+      payloadLength: payload ? payload.length : 0
+    });
+
     const connections = await storage.getChannelConnections(null) as ChannelConnection[];
     const instagramConnections = connections.filter(conn => conn.channelType === 'instagram');
 
+    logger.debug('instagram', 'Fetched connections for signature verification', { totalInstagramConnections: instagramConnections.length });
+
+    let checked = 0;
+    let withAppSecret = 0;
+    let skippedNoSecret = 0;
+
     for (const connection of instagramConnections) {
+      checked++;
       const connectionData = connection.connectionData as InstagramConnectionData;
-      if (connectionData?.appSecret) {
-        const isValid = verifyWebhookSignature(payload, signature, connectionData.appSecret);
-        if (isValid) {
-          logger.info('instagram', `Webhook signature verified for connection ${connection.id}`);
-          return true;
-        }
+      const hasAppSecret = !!connectionData?.appSecret;
+
+      const accountName = (connection as any).accountName || connectionData?.accountInfo?.name || null;
+
+      logger.debug('instagram', 'Verifying signature against connection', {
+        connectionId: connection.id,
+        accountName,
+        hasAppSecret
+      });
+
+      if (!hasAppSecret) {
+        skippedNoSecret++;
+        logger.warn('instagram', 'Skipping signature verification for connection due to missing appSecret', { connectionId: connection.id });
+        continue;
+      }
+
+      withAppSecret++;
+      let isValid = false;
+      try {
+        isValid = verifyWebhookSignature(payload, signature, connectionData.appSecret as string);
+      } catch (err: any) {
+        logger.error('instagram', 'Error while verifying signature for connection', { connectionId: connection.id, error: err });
+      }
+
+      logger.debug('instagram', 'Signature verification result', { connectionId: connection.id, valid: !!isValid });
+
+      if (isValid) {
+        logger.info('instagram', 'Webhook signature verified for connection', { connectionId: connection.id, accountName });
+        return true;
       }
     }
 
-    logger.warn('instagram', 'Webhook signature could not be verified against any connection');
+    logger.warn('instagram', 'Webhook signature could not be verified against any connection', {
+      totalChecked: checked,
+      withAppSecret,
+      skippedNoSecret,
+      suggestion: 'Ensure appSecret is configured for the Instagram connection(s) you expect to receive webhooks for.'
+    });
+
+    logger.info('instagram', 'Signature verification summary', { totalChecked: checked, withAppSecret, skippedNoSecret });
     return false;
-  } catch (error) {
-    logger.error('instagram', 'Error verifying webhook signature:', error);
+  } catch (error: any) {
+    logger.error('instagram', 'Exception during verifyWebhookSignatureForAnyConnection', {
+      errorName: error?.name || null,
+      errorMessage: error?.message || error,
+      stack: error?.stack || null
+    });
     return false;
   }
 }
 
 export async function processWebhook(body: InstagramWebhookBody, signature?: string, companyId?: number): Promise<void> {
   try {
+
+    console.log('🔍 [INSTAGRAM SERVICE] Webhook details:', {
+      hasSignature: !!signature,
+      bodyType: typeof body,
+      companyId: companyId || 'not_specified',
+      bodyKeys: Object.keys(body || {})
+    });
+    
     logger.info('instagram', 'Processing Instagram webhook:', {
       hasSignature: !!signature,
       bodyType: typeof body,
@@ -880,35 +1242,122 @@ export async function processWebhook(body: InstagramWebhookBody, signature?: str
     });
 
 
+    if (companyId) {
+      try {
+        const connections = await storage.getChannelConnectionsByType('instagram');
+        const errorConnections = connections.filter((conn: any) => 
+          conn.companyId === companyId && conn.status === 'error'
+        );
+        
+        if (errorConnections.length > 0) {
+
+          for (const connection of errorConnections) {
+            try {
+              await storage.updateChannelConnectionStatus(connection.id, 'active');
+              activeConnections.set(connection.id, true);
+              updateConnectionActivity(connection.id, true);
+              
+              eventEmitter.emit('connectionStatusUpdate', {
+                connectionId: connection.id,
+                status: 'active'
+              });
+              
+
+              logger.info('instagram', `Connection ${connection.id} status updated to active via webhook processing`);
+            } catch (updateError) {
+              console.error(`❌ [INSTAGRAM SERVICE] Failed to update connection ${connection.id}:`, updateError);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('❌ [INSTAGRAM SERVICE] Error updating connection statuses:', error);
+      }
+    }
+
+
     if (body['hub.mode'] === 'subscribe' && body['hub.verify_token']) {
+
       logger.info('instagram', 'Webhook verification request received');
       return;
     }
 
 
     if (signature && typeof body === 'string') {
+
       const isValidSignature = await verifyWebhookSignatureForAnyConnection(body, signature);
       if (!isValidSignature) {
+        console.error('❌ [INSTAGRAM SERVICE] Invalid webhook signature - rejecting');
         logger.error('instagram', 'Invalid webhook signature - rejecting request');
         throw new Error('Invalid webhook signature');
       }
+
     }
 
     if (body.entry && Array.isArray(body.entry)) {
+
+      
       for (const entry of body.entry) {
-        if (entry.messaging && Array.isArray(entry.messaging)) {
+        console.log('🔍 [INSTAGRAM SERVICE] Entry details:', {
+          id: entry.id,
+          hasMessaging: !!entry.messaging,
+          hasChanges: !!entry.changes,
+          isMessagingArray: Array.isArray(entry.messaging),
+          isChangesArray: Array.isArray(entry.changes),
+          messagingCount: Array.isArray(entry.messaging) ? entry.messaging.length : 0,
+          changesCount: Array.isArray(entry.changes) ? entry.changes.length : 0
+        });
+        
+
+        if (entry.changes && Array.isArray(entry.changes)) {
+
+          
+          for (const change of entry.changes) {
+            
+            
+
+            if (change.field === 'messages' && change.value) {
+              const messagingEvent = {
+                sender: change.value.sender,
+                recipient: change.value.recipient,
+                timestamp: typeof change.value.timestamp === 'string' ? parseInt(change.value.timestamp) : change.value.timestamp,
+                message: change.value.message,
+                reaction: undefined // Instagram changes don't have reaction field
+              };
+              
+              
+              
+              await handleIncomingInstagramMessage(messagingEvent, entry.id, companyId);
+            }
+          }
+        }
+
+        else if (entry.messaging && Array.isArray(entry.messaging)) {
+
+          
           for (const messagingEvent of entry.messaging) {
+            
+            
             await handleIncomingInstagramMessage(messagingEvent, entry.id, companyId);
           }
         } else if (entry.messaging) {
+
             logger.debug('instagram', 'Non-array messaging event received');
+        } else {
+
         }
       }
     } else {
+        console.warn('⚠️ [INSTAGRAM SERVICE] No entry array found in webhook body');
         logger.debug('instagram', 'No entry array found in webhook body');
     }
+    
+
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('❌ [INSTAGRAM SERVICE] Error in processWebhook:', errorMessage);
+    if (error instanceof Error) {
+      console.error('❌ [INSTAGRAM SERVICE] Error stack:', error.stack);
+    }
     logger.error('instagram', 'Error processing Instagram webhook:', errorMessage);
     throw error; // Re-throw to ensure proper HTTP error response
   }
@@ -973,6 +1422,18 @@ async function findOrCreateConversation(connectionId: number, recipientId: strin
     };
 
     conversation = await storage.createConversation(conversationData);
+
+
+    if ((global as any).broadcastToCompany) {
+      (global as any).broadcastToCompany({
+        type: 'newConversation',
+        data: {
+          ...conversation,
+          contact
+        }
+      }, companyId);
+
+    }
   }
 
   return conversation;
@@ -982,50 +1443,97 @@ async function handleIncomingInstagramMessage(messagingEvent: InstagramWebhookMe
   let connection: ChannelConnection | null = null;
 
   try {
+
+    
+    
     logger.debug('instagram', 'Processing incoming Instagram message event');
 
     const senderIgSid = messagingEvent.sender?.id;
     const message = messagingEvent.message;
 
     if (messagingEvent.reaction) {
+
         logger.debug('instagram', 'Skipping reaction event');
         return;
     }
 
     if (!senderIgSid || !message || !message.mid) {
+      console.warn('⚠️ [INSTAGRAM HANDLER] Missing required message data:', {
+        hasSender: !!senderIgSid,
+        hasMessage: !!message,
+        hasMessageId: !!message?.mid
+      });
       logger.warn('instagram', 'Missing required message data in event');
       return;
     }
+    
     if (message.is_echo) {
+
         logger.debug('instagram', 'Skipping echo message');
         return;
     }
 
 
+
     const connections = await storage.getChannelConnections(null) as ChannelConnection[];
+    console.log('🔍 [INSTAGRAM HANDLER] Available connections:', connections.map(conn => ({
+      id: conn.id,
+      type: conn.channelType,
+      accountName: conn.accountName,
+      instagramAccountId: conn.channelType === 'instagram' ? (conn.connectionData as InstagramConnectionData)?.instagramAccountId : 'N/A',
+      companyId: conn.companyId,
+      status: conn.status
+    })));
+    
     connection = connections.find(conn => {
       const connectionData = conn.connectionData as InstagramConnectionData;
       return conn.channelType === 'instagram' && connectionData?.instagramAccountId === recipientIgAccountId;
     }) || null;
 
+
     if (!connection) {
+
+      const instagramConnections = connections.filter(conn => 
+        conn.channelType === 'instagram' && 
+        (conn.status === 'active' || conn.status === 'error') &&
+        (!companyId || conn.companyId === companyId)
+      );
+      
+      if (instagramConnections.length > 0) {
+        connection = instagramConnections[0]; // Use the first available Instagram connection
+        
+      }
+    }
+
+    if (!connection) {
+      console.error('❌ [INSTAGRAM HANDLER] No Instagram connection found for account ID:', recipientIgAccountId);
       logger.warn('instagram', `No Instagram connection found for account ID: ${recipientIgAccountId}`);
       return;
     }
 
+    
 
     if (companyId && connection.companyId !== companyId) {
+      console.warn('⚠️ [INSTAGRAM HANDLER] Company ID mismatch:', {
+        connectionId: connection.id,
+        expected: companyId,
+        actual: connection.companyId
+      });
       logger.warn('instagram', `Company ID mismatch for connection ${connection.id}: expected ${companyId}, got ${connection.companyId}`);
       return;
     }
 
     if (!connection.companyId) {
+      console.error('❌ [INSTAGRAM HANDLER] Connection missing companyId - security violation:', connection.id);
       logger.error('instagram', `Connection ${connection.id} missing companyId - security violation`);
       return;
     }
 
+
     let contact = await storage.getContactByPhone(senderIgSid, connection.companyId) as Contact | null;
+    
     if (!contact) {
+
       const insertContactData: InsertContact = {
         companyId: connection.companyId,
         phone: senderIgSid,
@@ -1035,17 +1543,49 @@ async function handleIncomingInstagramMessage(messagingEvent: InstagramWebhookMe
         identifierType: 'instagram'
       };
       contact = await storage.getOrCreateContact(insertContactData);
+      
       logger.info('instagram', `Created new contact for Instagram user ${senderIgSid}`);
+    } else {
+      
     }
 
+    
     let conversation = await storage.getConversationByContactAndChannel(
       contact.id,
       connection.id
     ) as Conversation | null;
 
-    const messageTimestamp = new Date(messagingEvent.timestamp || message.timestamp || Date.now());
+
+    let messageTimestamp: Date;
+    try {
+      const timestampValue = messagingEvent.timestamp || message.timestamp;
+      if (timestampValue) {
+
+        if (typeof timestampValue === 'string' && !isNaN(Number(timestampValue))) {
+
+          messageTimestamp = new Date(Number(timestampValue) * 1000);
+        } else if (typeof timestampValue === 'number') {
+
+          messageTimestamp = new Date(timestampValue * 1000);
+        } else {
+
+          messageTimestamp = new Date(timestampValue);
+        }
+        
+
+        if (isNaN(messageTimestamp.getTime())) {
+          throw new Error('Invalid timestamp');
+        }
+      } else {
+        messageTimestamp = new Date();
+      }
+    } catch (error) {
+      console.warn('⚠️ [INSTAGRAM HANDLER] Invalid timestamp, using current time:', error);
+      messageTimestamp = new Date();
+    }
 
     if (!conversation) {
+
       const insertConversationData: InsertConversation = {
         companyId: connection.companyId,
         contactId: contact.id,
@@ -1056,22 +1596,44 @@ async function handleIncomingInstagramMessage(messagingEvent: InstagramWebhookMe
       };
       conversation = await storage.createConversation(insertConversationData);
       
+
+
+      if ((global as any).broadcastToCompany) {
+        (global as any).broadcastToCompany({
+          type: 'newConversation',
+          data: {
+            ...conversation,
+            contact
+          }
+        }, connection.companyId);
+
+      }
+    } else {
+      
     }
 
     let messageText: string;
     let messageType = 'text';
     let mediaUrl: string | null = null;
 
+    console.log('🔍 [INSTAGRAM HANDLER] Parsing message content:', {
+      hasText: !!message.text,
+      hasAttachments: !!(message.attachments && message.attachments.length > 0),
+      text: message.text
+    });
+
     if (message.text) {
       messageText = message.text;
+
     } else if (message.attachments && message.attachments.length > 0) {
       const attachment = message.attachments[0];
       messageType = attachment.type || 'media';
       mediaUrl = attachment.payload?.url || attachment.url || null;
       messageText = captionForAttachment(attachment);
-    } else {
       
+    } else {
       messageText = '[Unsupported or Empty Message Content]';
+
     }
 
     const insertMessageData: InsertMessage = {
@@ -1090,8 +1652,33 @@ async function handleIncomingInstagramMessage(messagingEvent: InstagramWebhookMe
       }
     };
 
+    console.log('📝 [INSTAGRAM HANDLER] Creating message in database:', {
+      conversationId: conversation.id,
+      content: messageText.substring(0, 50) + (messageText.length > 50 ? '...' : ''),
+      type: messageType,
+      direction: 'inbound',
+      externalId: message.mid
+    });
+
     const savedMessage = await storage.createMessage(insertMessageData);
+    
+    
     updateConnectionActivity(connection.id, true);
+
+
+
+    if (connection.status === 'error') {
+
+      await storage.updateChannelConnectionStatus(connection.id, 'active');
+      activeConnections.set(connection.id, true);
+      
+      eventEmitter.emit('connectionStatusUpdate', {
+        connectionId: connection.id,
+        status: 'active'
+      });
+      
+      logger.info('instagram', `Connection ${connection.id} status updated to active after successful message processing`);
+    }
 
     const updatedConversationDataForEvent = {
         ...conversation,
@@ -1583,5 +2170,6 @@ export default {
   verifyWebhookSignature,
   testWebhookConfiguration,
   validateConnectionConfiguration,
-  getConnectionHealth
+  getConnectionHealth,
+  initializeHealthMonitoring
 };

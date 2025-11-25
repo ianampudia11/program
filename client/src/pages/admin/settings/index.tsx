@@ -6,6 +6,7 @@ import { useLocation } from 'wouter';
 import { settingsEvents, SETTINGS_EVENTS } from '@/lib/settings-events';
 
 import { useBranding } from '@/contexts/branding-context';
+import { useCurrency } from '@/contexts/currency-context';
 import { useTranslation } from '@/hooks/use-translation';
 import AdminLayout from '@/components/admin/AdminLayout';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -23,21 +24,54 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  SelectSeparator,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
-import { Loader2, Upload, Check, CreditCard, Palette, Globe, FileImage, UserPlus, Mail, Database, RefreshCw, Settings, Key, Code, Copy, Eye } from 'lucide-react';
+import { Loader2, Upload, Check, CreditCard, Palette, Globe, FileImage, UserPlus, Mail, Database, RefreshCw, Settings, Key, Code, Copy, Eye, EyeOff, Trash2, Plus } from 'lucide-react';
 import BackupManagement from '@/components/admin/BackupManagement';
 import SystemUpdatesTab from '@/components/settings/SystemUpdatesTab';
 
 import { PartnerConfigurationForm } from '@/components/settings/PartnerConfigurationForm';
 import { MetaPartnerConfigurationForm } from '@/components/settings/MetaPartnerConfigurationForm';
+import { TikTokPlatformConfigForm } from '@/components/settings/TikTokPlatformConfigForm';
 import AiCredentialsTab from '@/components/admin/AiCredentialsTab';
 import SystemUsageAnalytics from '@/components/admin/SystemUsageAnalytics';
+
+
+const BUILT_IN_CURRENCY_OPTIONS = [
+  { code: 'ARS', label: 'ARS - Argentine Peso' },
+  { code: 'BRL', label: 'BRL - Brazilian Real' },
+  { code: 'MXN', label: 'MXN - Mexican Peso' },
+  { code: 'CLP', label: 'CLP - Chilean Peso' },
+  { code: 'COP', label: 'COP - Colombian Peso' },
+  { code: 'PEN', label: 'PEN - Peruvian Sol' },
+  { code: 'UYU', label: 'UYU - Uruguayan Peso' },
+  { code: 'PYG', label: 'PYG - Paraguayan Guarani' },
+  { code: 'BOB', label: 'BOB - Bolivian Boliviano' },
+  { code: 'VEF', label: 'VEF - Venezuelan Bolívar' },
+  { code: 'PKR', label: 'PKR - Pakistani Rupee' },
+  { code: 'INR', label: 'INR - Indian Rupee' },
+  { code: 'USD', label: 'USD - US Dollar' },
+  { code: 'EUR', label: 'EUR - Euro' },
+] as const;
+
+
+const BUILT_IN_CURRENCY_CODES: string[] = BUILT_IN_CURRENCY_OPTIONS.map(opt => opt.code);
 
 export default function AdminSettingsPage() {
   const { toast } = useToast();
   const { t } = useTranslation();
   const { refreshBranding } = useBranding();
+  const { formatCurrency } = useCurrency();
   const [location] = useLocation();
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
@@ -45,6 +79,7 @@ export default function AdminSettingsPage() {
   const [faviconPreview, setFaviconPreview] = useState<string | null>(null);
   const [showPartnerConfigModal, setShowPartnerConfigModal] = useState(false);
   const [showMetaPartnerConfigModal, setShowMetaPartnerConfigModal] = useState(false);
+  const [showTikTokPlatformConfigModal, setShowTikTokPlatformConfigModal] = useState(false);
   const [brandingUpdateKey, setBrandingUpdateKey] = useState(0);
 
   const urlParams = new URLSearchParams(location.split('?')[1] || '');
@@ -68,7 +103,7 @@ export default function AdminSettingsPage() {
   }, []);
 
   const [brandingForm, setBrandingForm] = useState({
-    appName: 'BotHive',
+    appName: 'PowerChat',
     primaryColor: '#333235',
     secondaryColor: '#4F46E5'
   });
@@ -161,6 +196,8 @@ export default function AdminSettingsPage() {
     consumerSecret: '',
     businessShortcode: '',
     passkey: '',
+    shortcodeType: 'paybill',
+    callbackUrl: '',
     testMode: true,
     enabled: false
   });
@@ -182,25 +219,35 @@ export default function AdminSettingsPage() {
     subdomainAuthentication: false,
     frontendWebsiteEnabled: false,
     planRenewalEnabled: true,
-    helpSupportUrl: ''
+    helpSupportUrl: '',
+    customCurrencies: [] as Array<{ code: string; name: string; symbol: string }>
   });
 
   const [smtpForm, setSmtpForm] = useState({
     enabled: false,
     host: '',
     port: 465,
-    security: 'starttls',
+    security: 'ssl',
     username: '',
     password: '',
     fromName: '',
     fromEmail: '',
     testEmail: ''
   });
+  const [isSmtpPasswordVisible, setIsSmtpPasswordVisible] = useState(false);
+  const [storedSmtpPassword, setStoredSmtpPassword] = useState('');
 
   const [customScriptsForm, setCustomScriptsForm] = useState({
     enabled: false,
     scripts: '',
     lastModified: ''
+  });
+
+  const [showCustomCurrencyDialog, setShowCustomCurrencyDialog] = useState(false);
+  const [customCurrencyForm, setCustomCurrencyForm] = useState({
+    code: '',
+    name: '',
+    symbol: ''
   });
 
 
@@ -326,9 +373,7 @@ export default function AdminSettingsPage() {
       const mpesaSetting = settings.find((s: any) => s.key === 'payment_mpesa');
       if (mpesaSetting) {
         setMpesaForm({
-          ...mpesaSetting.value,
-          consumerSecret: mpesaSetting.value.consumerSecret ? '••••••••' : '',
-          passkey: mpesaSetting.value.passkey ? '••••••••' : ''
+          ...mpesaSetting.value
         });
       }
 
@@ -347,15 +392,17 @@ export default function AdminSettingsPage() {
           subdomainAuthentication: settingsValue.subdomainAuthentication || false,
           frontendWebsiteEnabled: settingsValue.frontendWebsiteEnabled !== undefined ? settingsValue.frontendWebsiteEnabled : false,
           planRenewalEnabled: settingsValue.planRenewalEnabled !== undefined ? settingsValue.planRenewalEnabled : true,
-          helpSupportUrl: settingsValue.helpSupportUrl || ''
+          helpSupportUrl: settingsValue.helpSupportUrl || '',
+          customCurrencies: settingsValue.customCurrencies || []
         });
       }
 
       const smtpSetting = settings.find((s: any) => s.key === 'smtp_config');
       if (smtpSetting) {
+        setStoredSmtpPassword(smtpSetting.value.password || '');
         setSmtpForm({
           ...smtpSetting.value,
-          password: smtpSetting.value.password ? '••••••••' : ''
+          password: '' // Clear password field for security
         });
       }
 
@@ -825,10 +872,9 @@ export default function AdminSettingsPage() {
 
   const saveMpesaMutation = useMutation({
     mutationFn: async () => {
+      const { _showConsumerSecret, _showPasskey, ...cleanForm } = mpesaForm as any;
       const payload = {
-        ...mpesaForm,
-        consumerSecret: mpesaForm.consumerSecret === '••••••••' ? undefined : mpesaForm.consumerSecret,
-        passkey: mpesaForm.passkey === '••••••••' ? undefined : mpesaForm.passkey
+        ...cleanForm
       };
       const res = await apiRequest('POST', '/api/admin/settings/payment/mpesa', payload);
       if (!res.ok) {
@@ -907,6 +953,99 @@ export default function AdminSettingsPage() {
     }
   });
 
+  const handleAddCustomCurrency = () => {
+    const code = customCurrencyForm.code.trim().toUpperCase();
+    const name = customCurrencyForm.name.trim();
+    const symbol = customCurrencyForm.symbol.trim();
+
+
+    if (!code || !name || !symbol) {
+      toast({
+        title: 'Validation error',
+        description: 'All fields are required',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+    if (!/^[A-Z]{3}$/.test(code)) {
+      toast({
+        title: 'Validation error',
+        description: 'Currency code must be exactly 3 uppercase letters (ISO 4217 format)',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+
+    if (generalSettingsForm.customCurrencies.some(c => c.code === code)) {
+      toast({
+        title: 'Validation error',
+        description: 'This currency code already exists in custom currencies',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+
+    if (BUILT_IN_CURRENCY_CODES.includes(code)) {
+      toast({
+        title: 'Validation error',
+        description: 'This currency code already exists in default currencies',
+        variant: 'destructive'
+      });
+      return;
+    }
+
+
+    try {
+      new Intl.NumberFormat('en-US', { style: 'currency', currency: code }).format(1);
+    } catch (error) {
+      toast({
+        title: 'Validation error',
+        description: `Currency code ${code} is not supported by the browser's Intl API. Please use a valid ISO 4217 currency code.`,
+        variant: 'destructive'
+      });
+      return;
+    }
+
+
+    setGeneralSettingsForm({
+      ...generalSettingsForm,
+      customCurrencies: [...generalSettingsForm.customCurrencies, { code, name, symbol }]
+    });
+
+
+    setCustomCurrencyForm({ code: '', name: '', symbol: '' });
+    setShowCustomCurrencyDialog(false);
+
+    toast({
+      title: 'Custom currency added',
+      description: `${code} - ${name} has been added successfully.`
+    });
+  };
+
+  const handleRemoveCustomCurrency = (code: string) => {
+
+    const needsDefaultCurrencyUpdate = generalSettingsForm.defaultCurrency === code;
+    
+
+    const updatedForm = {
+      ...generalSettingsForm,
+      customCurrencies: generalSettingsForm.customCurrencies.filter(c => c.code !== code),
+      ...(needsDefaultCurrencyUpdate && { defaultCurrency: 'USD' })
+    };
+
+    setGeneralSettingsForm(updatedForm);
+
+    toast({
+      title: 'Custom currency removed',
+      description: needsDefaultCurrencyUpdate 
+        ? `Currency ${code} has been removed. Default currency has been switched to USD.`
+        : `Currency ${code} has been removed.`
+    });
+  };
+
   const saveGeneralSettingsMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest('POST', '/api/admin/settings/general', generalSettingsForm);
@@ -948,7 +1087,8 @@ export default function AdminSettingsPage() {
     mutationFn: async () => {
       const payload = {
         ...smtpForm,
-        password: smtpForm.password === '••••••••' ? undefined : smtpForm.password
+
+        password: smtpForm.password || storedSmtpPassword
       };
 
       const res = await apiRequest('POST', '/api/admin/settings/smtp', payload);
@@ -1194,13 +1334,52 @@ export default function AdminSettingsPage() {
   });
 
 
+
+  const getIframeProps = () => {
+    const currentUrl = window.location.origin;
+    const width = embedSettings.width || '100%';
+    const height = embedSettings.height || '600px';
+
+    const brandingSetting = settings?.find((s: any) => s.key === 'branding');
+    const appTitle = brandingForm.appName || brandingSetting?.value?.appName || 'PowerChat Application';
+
+    const styles: React.CSSProperties = {
+      border: 'none',
+    };
+    if (embedSettings.borderRadius) {
+      styles.borderRadius = embedSettings.borderRadius;
+    }
+    if (embedSettings.boxShadow) {
+      styles.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
+    }
+
+    const embedUrl = new URL(currentUrl);
+    embedUrl.searchParams.set('embed', 'true');
+    if (!embedSettings.showHeader) {
+      embedUrl.searchParams.set('hideHeader', 'true');
+    }
+
+    return {
+      src: embedUrl.toString(),
+      width: width,
+      height: height,
+      frameBorder: 0,
+      allow: `camera; microphone; geolocation; encrypted-media${embedSettings.allowFullscreen ? '; fullscreen' : ''}`,
+      allowFullScreen: embedSettings.allowFullscreen || false,
+      sandbox: 'allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-top-navigation-by-user-activation',
+      loading: 'lazy' as const,
+      title: `${appTitle} - Embedded Application`,
+      style: styles,
+    };
+  };
+
   const generateEmbedCode = () => {
     const currentUrl = window.location.origin;
     const width = embedSettings.width || '100%';
     const height = embedSettings.height || '600px';
 
     const brandingSetting = settings?.find((s: any) => s.key === 'branding');
-    const appTitle = brandingForm.appName || brandingSetting?.value?.appName || 'BotHive Application';
+    const appTitle = brandingForm.appName || brandingSetting?.value?.appName || 'PowerChat Application';
 
 
     const styles = [];
@@ -2404,14 +2583,28 @@ export default function AdminSettingsPage() {
 
                   <div className="space-y-2">
                     <Label htmlFor="consumerSecret">Consumer Secret</Label>
-                    <Input
-                      id="consumerSecret"
-                      type="password"
-                      value={mpesaForm.consumerSecret}
-                      onChange={(e) => setMpesaForm({...mpesaForm, consumerSecret: e.target.value})}
-                      placeholder="Your MPESA Consumer Secret"
-                      disabled={!mpesaForm.enabled}
-                    />
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="consumerSecret"
+                        type={mpesaForm as any && (mpesaForm as any)._showConsumerSecret ? 'text' : 'password'}
+                        value={mpesaForm.consumerSecret}
+                        onChange={(e) => setMpesaForm({...mpesaForm, consumerSecret: e.target.value})}
+                        placeholder="Your MPESA Consumer Secret"
+                        disabled={!mpesaForm.enabled}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setMpesaForm({
+                          ...mpesaForm,
+                          _showConsumerSecret: !(mpesaForm as any)._showConsumerSecret
+                        } as any)}
+                        aria-label={(mpesaForm as any)._showConsumerSecret ? 'Hide Consumer Secret' : 'Show Consumer Secret'}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
 
                   <div className="space-y-2">
@@ -2426,15 +2619,60 @@ export default function AdminSettingsPage() {
                   </div>
 
                   <div className="space-y-2">
+                    <Label htmlFor="shortcodeType">Shortcode Type</Label>
+                    <Select
+                      value={mpesaForm.shortcodeType}
+                      onValueChange={(value) => setMpesaForm({...mpesaForm, shortcodeType: value as any})}
+                      disabled={!mpesaForm.enabled}
+                    >
+                      <SelectTrigger id="shortcodeType">
+                        <SelectValue placeholder="Select shortcode type" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="paybill">PayBill</SelectItem>
+                        <SelectItem value="buygoods">BuyGoods (Till)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
                     <Label htmlFor="passkey">Passkey</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="passkey"
+                        type={(mpesaForm as any)._showPasskey ? 'text' : 'password'}
+                        value={mpesaForm.passkey}
+                        onChange={(e) => setMpesaForm({...mpesaForm, passkey: e.target.value})}
+                        placeholder="Your MPESA Passkey"
+                        disabled={!mpesaForm.enabled}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setMpesaForm({
+                          ...mpesaForm,
+                          _showPasskey: !(mpesaForm as any)._showPasskey
+                        } as any)}
+                        aria-label={(mpesaForm as any)._showPasskey ? 'Hide Passkey' : 'Show Passkey'}
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="callbackUrl">Callback URL</Label>
                     <Input
-                      id="passkey"
-                      type="password"
-                      value={mpesaForm.passkey}
-                      onChange={(e) => setMpesaForm({...mpesaForm, passkey: e.target.value})}
-                      placeholder="Your MPESA Passkey"
+                      id="callbackUrl"
+                      value={mpesaForm.callbackUrl}
+                      onChange={(e) => setMpesaForm({...mpesaForm, callbackUrl: e.target.value})}
+                      placeholder="https://your-domain.com/api/webhooks/mpesa"
                       disabled={!mpesaForm.enabled}
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Must be a publicly reachable HTTPS URL that accepts MPESA STK callbacks.
+                    </p>
                   </div>
 
                   <div className="flex items-center space-x-2">
@@ -2636,7 +2874,7 @@ export default function AdminSettingsPage() {
                         if (port === 465) {
                           suggestedSecurity = 'ssl';
                         } else if (port === 465) {
-                          suggestedSecurity = 'starttls';
+                          suggestedSecurity = 'ssl';
                         } else if (port === 25) {
                           suggestedSecurity = 'none';
                         }
@@ -2647,7 +2885,7 @@ export default function AdminSettingsPage() {
                       disabled={!smtpForm.enabled}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Common ports: 465 (STARTTLS), 465 (SSL), 25 (No encryption)
+                      Common ports: 465 (SSL), 25 (No encryption)
                     </p>
                   </div>
 
@@ -2658,11 +2896,11 @@ export default function AdminSettingsPage() {
                       type="password"
                       value={smtpForm.password}
                       onChange={(e) => setSmtpForm({...smtpForm, password: e.target.value})}
-                      placeholder="••••••••"
+                      placeholder={storedSmtpPassword ? "Leave empty to keep current password" : "Enter password"}
                       disabled={!smtpForm.enabled}
                     />
                     <p className="text-xs text-muted-foreground">
-                      For Gmail, use an App Password instead of your regular password
+                      {storedSmtpPassword ? "Password is set. Leave empty to keep it unchanged, or enter new password." : "For Gmail, use an App Password instead of your regular password"}
                     </p>
                   </div>
 
@@ -2677,7 +2915,6 @@ export default function AdminSettingsPage() {
                         <SelectValue placeholder="Select security" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="starttls">STARTTLS (Port 465)</SelectItem>
                         <SelectItem value="ssl">SSL/TLS (Port 465)</SelectItem>
                         <SelectItem value="none">None (Port 25)</SelectItem>
                       </SelectContent>
@@ -2702,7 +2939,7 @@ export default function AdminSettingsPage() {
                       id="smtp-from-name"
                       value={smtpForm.fromName}
                       onChange={(e) => setSmtpForm({...smtpForm, fromName: e.target.value})}
-                      placeholder="BotHive Support"
+                      placeholder="PowerChat Support"
                       disabled={!smtpForm.enabled}
                     />
                   </div>
@@ -2765,6 +3002,95 @@ export default function AdminSettingsPage() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="defaultCurrency">Default Currency</Label>
+                    
+                    {/* Custom Currency Management Section */}
+                    <div className="mb-3 space-y-2">
+                      <Dialog open={showCustomCurrencyDialog} onOpenChange={setShowCustomCurrencyDialog}>
+                        <DialogTrigger asChild>
+                          <Button type="button" variant="outline" size="sm" className="w-full">
+                            <Plus className="mr-2 h-4 w-4" />
+                            Add Custom Currency
+                          </Button>
+                        </DialogTrigger>
+                        <DialogContent>
+                          <DialogHeader>
+                            <DialogTitle>Add Custom Currency</DialogTitle>
+                            <DialogDescription>
+                              Add a custom currency with a 3-letter ISO 4217 code, name, and symbol.
+                            </DialogDescription>
+                          </DialogHeader>
+                          <div className="space-y-4 py-4">
+                            <div className="space-y-2">
+                              <Label htmlFor="currency-code">Currency Code (ISO 4217)</Label>
+                              <Input
+                                id="currency-code"
+                                placeholder="USD"
+                                value={customCurrencyForm.code}
+                                onChange={(e) => setCustomCurrencyForm({...customCurrencyForm, code: e.target.value.toUpperCase()})}
+                                maxLength={3}
+                              />
+                              <p className="text-xs text-muted-foreground">
+                                3 uppercase letters (e.g., USD, EUR, GBP)
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="currency-name">Currency Name</Label>
+                              <Input
+                                id="currency-name"
+                                placeholder="US Dollar"
+                                value={customCurrencyForm.name}
+                                onChange={(e) => setCustomCurrencyForm({...customCurrencyForm, name: e.target.value})}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="currency-symbol">Currency Symbol</Label>
+                              <Input
+                                id="currency-symbol"
+                                placeholder="$"
+                                value={customCurrencyForm.symbol}
+                                onChange={(e) => setCustomCurrencyForm({...customCurrencyForm, symbol: e.target.value})}
+                              />
+                            </div>
+                          </div>
+                          <DialogFooter>
+                            <Button variant="outline" onClick={() => {
+                              setShowCustomCurrencyDialog(false);
+                              setCustomCurrencyForm({ code: '', name: '', symbol: '' });
+                            }}>
+                              Cancel
+                            </Button>
+                            <Button onClick={handleAddCustomCurrency}>
+                              Add Currency
+                            </Button>
+                          </DialogFooter>
+                        </DialogContent>
+                      </Dialog>
+
+                      {generalSettingsForm.customCurrencies.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium text-muted-foreground">Custom Currencies:</p>
+                          <div className="space-y-1">
+                            {generalSettingsForm.customCurrencies.map((currency) => (
+                              <div key={currency.code} className="flex items-center justify-between p-2 border rounded-md">
+                                <span className="text-sm">
+                                  {currency.code} - {currency.name} ({currency.symbol})
+                                </span>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleRemoveCustomCurrency(currency.code)}
+                                  className="h-8 w-8 p-0"
+                                >
+                                  <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
                     <Select
                       value={generalSettingsForm.defaultCurrency}
                       onValueChange={(value) => setGeneralSettingsForm({...generalSettingsForm, defaultCurrency: value})}
@@ -2773,20 +3099,21 @@ export default function AdminSettingsPage() {
                         <SelectValue placeholder="Select currency" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="ARS">ARS - Argentine Peso</SelectItem>
-                        <SelectItem value="BRL">BRL - Brazilian Real</SelectItem>
-                        <SelectItem value="MXN">MXN - Mexican Peso</SelectItem>
-                        <SelectItem value="CLP">CLP - Chilean Peso</SelectItem>
-                        <SelectItem value="COP">COP - Colombian Peso</SelectItem>
-                        <SelectItem value="PEN">PEN - Peruvian Sol</SelectItem>
-                        <SelectItem value="UYU">UYU - Uruguayan Peso</SelectItem>
-                        <SelectItem value="PYG">PYG - Paraguayan Guarani</SelectItem>
-                        <SelectItem value="BOB">BOB - Bolivian Boliviano</SelectItem>
-                        <SelectItem value="VEF">VEF - Venezuelan Bolívar</SelectItem>
-                        <SelectItem value="PKR">PKR - Pakistani Rupee</SelectItem>
-                        <SelectItem value="INR">INR - Indian Rupee</SelectItem>
-                        <SelectItem value="USD">USD - US Dollar</SelectItem>
-                        <SelectItem value="EUR">EUR - Euro</SelectItem>
+                        {BUILT_IN_CURRENCY_OPTIONS.map((currency) => (
+                          <SelectItem key={currency.code} value={currency.code}>
+                            {currency.label}
+                          </SelectItem>
+                        ))}
+                        {generalSettingsForm.customCurrencies.length > 0 && (
+                          <>
+                            <SelectSeparator />
+                            {generalSettingsForm.customCurrencies.map((currency) => (
+                              <SelectItem key={currency.code} value={currency.code}>
+                                {currency.code} - {currency.name} ({currency.symbol})
+                              </SelectItem>
+                            ))}
+                          </>
+                        )}
                       </SelectContent>
                     </Select>
                   </div>
@@ -2958,11 +3285,11 @@ export default function AdminSettingsPage() {
                           />
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          Copy this HTML code and paste it into your website where you want BotHive to appear.
+                          Copy this HTML code and paste it into your website where you want PowerChat to appear.
                         </p>
                       </div>
 
-                      {showEmbedPreview && (
+                      {showEmbedPreview && embedCode && (
                         <div className="space-y-2">
                           <Label>Embed Preview</Label>
                           <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
@@ -2972,10 +3299,12 @@ export default function AdminSettingsPage() {
                                 width: embedSettings.width === '100%' ? '100%' : embedSettings.width,
                                 height: embedSettings.height,
                                 maxWidth: '100%',
-                                maxHeight: '700px'
+                                maxHeight: '700px',
+                                overflow: 'hidden'
                               }}
-                              dangerouslySetInnerHTML={{ __html: embedCode }}
-                            />
+                            >
+                              <iframe {...getIframeProps()} />
+                            </div>
                           </div>
                           <p className="text-xs text-muted-foreground">
                             This is how the embedded application will appear on external websites.
@@ -3264,7 +3593,7 @@ export default function AdminSettingsPage() {
                           .filter((plan: any) => plan.isActive)
                           .map((plan: any) => (
                             <SelectItem key={plan.id} value={plan.id.toString()}>
-                              {plan.name} (${plan.price}/month) - {plan.maxUsers} users
+                              {plan.name} ({formatCurrency(plan.price)}/month) - {plan.maxUsers} users
                             </SelectItem>
                           ))
                       ) : (
@@ -3396,6 +3725,36 @@ export default function AdminSettingsPage() {
                       <p>• Automatic phone number provisioning</p>
                     </div>
                   </div>
+
+                  {/* TikTok Business Messaging API Configuration */}
+                  <div className="border rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <h3 className="text-lg font-medium flex items-center gap-2">
+                          <i className="ri-tiktok-line text-xl"></i>
+                          TikTok Business Messaging API
+                        </h3>
+                        <p className="text-sm text-gray-500">
+                          Configure TikTok Partner credentials for company messaging integration
+                        </p>
+                      </div>
+                      <Button
+                        onClick={() => setShowTikTokPlatformConfigModal(true)}
+                        variant="outline"
+                        className="btn-brand-primary"
+                      >
+                        <Settings className="w-4 h-4 mr-2" />
+                        {t('admin.settings.configure', 'Configure')}
+                      </Button>
+                    </div>
+
+                    <div className="text-sm text-gray-600">
+                      <p>• Platform-wide TikTok Business Messaging integration</p>
+                      <p>• OAuth 2.0 authentication for company accounts</p>
+                      <p>• Direct messaging with TikTok users</p>
+                      <p>• Requires TikTok Messaging Partner approval</p>
+                    </div>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -3409,7 +3768,7 @@ export default function AdminSettingsPage() {
                   Custom Scripts
                 </CardTitle>
                 <CardDescription>
-                  Inject custom HTML and JavaScript code globally across your BotHive application.
+                  Inject custom HTML and JavaScript code globally across your PowerChat application.
                   This feature allows you to integrate third-party services like translation tools, analytics, or other widgets.
                 </CardDescription>
               </CardHeader>
@@ -3531,6 +3890,18 @@ export default function AdminSettingsPage() {
               description: "Meta Partner configuration updated successfully",
             });
             setShowMetaPartnerConfigModal(false);
+          }}
+        />
+
+        <TikTokPlatformConfigForm
+          isOpen={showTikTokPlatformConfigModal}
+          onClose={() => setShowTikTokPlatformConfigModal(false)}
+          onSuccess={() => {
+            toast({
+              title: "Success",
+              description: "TikTok platform configuration updated successfully",
+            });
+            setShowTikTokPlatformConfigModal(false);
           }}
         />
       </div>

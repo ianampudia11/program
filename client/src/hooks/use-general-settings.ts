@@ -12,6 +12,11 @@ export interface GeneralSettings {
   frontendWebsiteEnabled: boolean;
   planRenewalEnabled: boolean;
   helpSupportUrl: string;
+  customCurrencies?: Array<{
+    code: string;
+    name: string;
+    symbol: string;
+  }>;
 }
 
 export function useGeneralSettings() {
@@ -32,12 +37,13 @@ export function useGeneralSettings() {
           subdomainAuthentication: false,
           frontendWebsiteEnabled: false,
           planRenewalEnabled: true, // Default to enabled for safety
-          helpSupportUrl: ''
+          helpSupportUrl: '',
+          customCurrencies: []
         };
       }
       return res.json();
     },
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    staleTime: 60 * 1000, // 1 minute
     refetchOnWindowFocus: false,
     refetchOnMount: true,
     retry: 1,
@@ -50,7 +56,7 @@ export function useGeneralSettings() {
     const handleSettingsUpdate = (message: any) => {
       if (message.key === 'general_settings') {
 
-        queryClient.invalidateQueries({ queryKey: ['general-settings'] });
+        queryClient.invalidateQueries({ queryKey: ['/api/public/general-settings'] });
       }
     };
 
@@ -67,7 +73,8 @@ export function useGeneralSettings() {
       subdomainAuthentication: false,
       frontendWebsiteEnabled: false,
       planRenewalEnabled: true,
-      helpSupportUrl: ''
+      helpSupportUrl: '',
+      customCurrencies: []
     },
     isLoading,
     error,

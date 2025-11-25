@@ -71,7 +71,7 @@ const englishTranslations = {
   'landing.nav.get_started': 'Get Started',
 
   'landing.hero.title': 'Ready to transform your customer communication?',
-  'landing.hero.subtitle': 'Join thousands of businesses using BotHive to streamline their customer interactions and boost satisfaction rates.',
+  'landing.hero.subtitle': 'Join thousands of businesses using PowerChat to streamline their customer interactions and boost satisfaction rates.',
   'landing.hero.start_free_trial': 'Start Free Trial',
   'landing.hero.sign_in': 'Sign In',
 
@@ -112,7 +112,7 @@ const englishTranslations = {
   'landing.pricing.flows': '{{count}} flows',
 
   'landing.cta.title': 'Ready to transform your customer communication?',
-  'landing.cta.subtitle': 'Join thousands of businesses using BotHive to streamline their customer interactions and boost satisfaction rates.',
+  'landing.cta.subtitle': 'Join thousands of businesses using PowerChat to streamline their customer interactions and boost satisfaction rates.',
   'landing.cta.start_free_trial': 'Start Free Trial',
   'landing.cta.sign_in': 'Sign In',
 

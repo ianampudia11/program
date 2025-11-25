@@ -47,7 +47,8 @@ import {
   Copy,
   ExternalLink
 } from "lucide-react";
-import { formatCurrency, formatDate, cn } from "@/lib/utils";
+import { formatDate, cn } from "@/lib/utils";
+import { useCurrency } from "@/contexts/currency-context";
 import {
   ComposedChart,
   Line,
@@ -201,6 +202,7 @@ export default function AffiliateManagementPage() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { formatCurrency } = useCurrency();
 
 
   const generateReferralUrl = (affiliateCode: string) => {

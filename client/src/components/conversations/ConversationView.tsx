@@ -12,6 +12,7 @@ import { GroupAvatar } from '@/components/groups/GroupAvatar';
 import GroupParticipantsModal from '@/components/groups/GroupParticipantsModal';
 import ConnectionControl from '../whatsapp/ConnectionControl';
 import { ContactAvatar } from '@/components/contacts/ContactAvatar';
+import { TwilioIcon } from '@/components/icons/TwilioIcon';
 import AgentAssignment from './AgentAssignment';
 import BotIcon from '@/components/ui/bot-icon';
 import { useMobileLayout } from '@/contexts/mobile-layout-context';
@@ -279,16 +280,55 @@ export default function ConversationView() {
 
   const renderMessagesWithDateSeparators = () => {
 
+    const getMsgTime = (m: any) => {
+
+
+      if (m.metadata?.timestamp) {
+        const ts = m.metadata.timestamp;
+
+        if (typeof ts === 'number') {
+          return ts;
+        }
+
+        if (typeof ts === 'string') {
+          return new Date(ts).getTime();
+        }
+      }
+
+      const primary = m.sentAt || m.createdAt;
+      const fallback = m.metadata?.timestamp ? new Date(m.metadata.timestamp) : null;
+      const d = primary ? new Date(primary) : fallback;
+      return d ? d.getTime() : 0;
+    };
+
     const allMessages = activeMessages
       .filter((message, index, self) => {
         const isFirstOccurrenceById = index === self.findIndex(m => m.id === message.id);
         return isFirstOccurrenceById;
       })
       .sort((a, b) => {
-        const dateA = new Date(a.sentAt || a.createdAt);
-        const dateB = new Date(b.sentAt || b.createdAt);
-        return dateA.getTime() - dateB.getTime();
+        const ta = getMsgTime(a);
+        const tb = getMsgTime(b);
+        if (ta !== tb) return ta - tb;
+
+        const idA = typeof a.id === 'number' ? a.id : Number.MAX_SAFE_INTEGER;
+        const idB = typeof b.id === 'number' ? b.id : Number.MAX_SAFE_INTEGER;
+        return idA - idB;
       });
+
+
+    if (activeConversation?.channelType === 'webchat') {
+      console.log('[WebChat Sorted Messages]', allMessages.map(m => ({
+        id: m.id,
+        direction: m.direction,
+        content: m.content?.substring(0, 30),
+        sentAtMs: m.sentAt ? new Date(m.sentAt).getTime() : null,
+        createdAtMs: new Date(m.createdAt).getTime(),
+        metadataTimestamp: m.metadata?.timestamp,
+        metadataChannelType: m.metadata?.channelType,
+        calculatedTime: getMsgTime(m)
+      })));
+    }
 
 
     const filteredMessages = allMessages.filter(message => message.type !== 'reaction');
@@ -424,10 +464,13 @@ export default function ConversationView() {
         return { icon: 'ri-mail-line', color: '#333235', name: t('conversations.view.channel.email', 'Email') };
       case 'sms':
         return { icon: 'ri-message-2-line', color: '#10B981', name: t('conversations.view.channel.sms', 'SMS') };
+      case 'twilio_sms':
+      case 'twilio_voice':
+        return { icon: TwilioIcon, color: '#F22F46', name: t('conversations.view.channel.twilio', 'Twilio') };
       case 'webapp':
         return { icon: 'ri-global-line', color: '#8B5CF6', name: t('conversations.view.channel.web_chat', 'Web Chat') };
       default:
-        return { icon: 'ri-chat-1-line', color: '#333235', name: t('conversations.view.channel.chat', 'Chat') };
+        return { icon: 'ri-message-3-line', color: '#333235', name: t('conversations.view.channel.chat', 'Chat') };
     }
   };
 
@@ -519,7 +562,11 @@ export default function ConversationView() {
             </div>
             <div className="flex items-center text-xs sm:text-sm text-gray-500 mt-1">
               <span className="flex items-center">
-                <i className={channelInfo.icon + " mr-1"} style={{ color: channelInfo.color }}></i>
+                {typeof channelInfo.icon === 'string' ? (
+                  <i className={channelInfo.icon + " mr-1"} style={{ color: channelInfo.color }}></i>
+                ) : (
+                  <channelInfo.icon className="mr-1 h-4 w-4" style={{ color: channelInfo.color }} />
+                )}
                 <span className="truncate">{channelInfo.name}</span>
               </span>
               {activeConversation?.isGroup && (

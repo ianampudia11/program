@@ -16,7 +16,7 @@ router.get('/models', async (req, res) => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'HTTP-Referer': 'https://powerchat.plus',
-      'X-Title': 'BotHive Plus'
+      'X-Title': 'PowerChat Plus'
     };
 
 

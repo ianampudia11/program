@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { useToast } from '@/hooks/use-toast';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { formatPlanDurationForDisplay } from '@/utils/plan-duration';
+import { useCurrency } from '@/contexts/currency-context';
 import {
   Dialog,
   DialogContent,
@@ -81,6 +82,7 @@ interface DunningStatus {
 
 export function SubscriptionManagement() {
   const { toast } = useToast();
+  const { formatCurrency } = useCurrency();
   const [showPauseDialog, setShowPauseDialog] = useState(false);
   const [showDowngradeDialog, setShowDowngradeDialog] = useState(false);
   const [pauseDays, setPauseDays] = useState(30);
@@ -263,7 +265,7 @@ export function SubscriptionManagement() {
                   <p className="text-sm text-gray-600">{planInfo.plan.description}</p>
                 </div>
                 <div className="text-right">
-                  <p className="text-2xl font-bold">${planInfo.plan.price}</p>
+                  <p className="text-2xl font-bold">{formatCurrency(planInfo.plan.price)}</p>
                   <p className="text-sm text-gray-600">
                     {formatPlanDurationForDisplay(planInfo.plan)}
                   </p>

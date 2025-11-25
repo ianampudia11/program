@@ -47,6 +47,7 @@ import {
 import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
 import { ToastAction } from '@/components/ui/toast';
+import type { SegmentFilterCriteria } from '../../../../shared/schema';
 
 interface EditSegmentModalProps {
   isOpen: boolean;
@@ -55,12 +56,7 @@ interface EditSegmentModalProps {
   onSegmentUpdated: (segment: any) => void;
 }
 
-interface SegmentCriteria {
-  tags: string[];
-  created_after?: string;
-  created_before?: string;
-  excludedContactIds?: number[];
-}
+type SegmentCriteria = SegmentFilterCriteria;
 
 interface ContactSegment {
   id: number;
@@ -222,7 +218,7 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
 
 
   useEffect(() => {
-    if (isOpen && (criteria.tags.length > 0 || criteria.created_after || criteria.created_before)) {
+    if (isOpen && ((criteria.tags?.length ?? 0) > 0 || criteria.created_after || criteria.created_before)) {
       debouncedPreview(criteria);
     } else {
       setContactCount(null);
@@ -286,10 +282,10 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
     Math.max(0, contactCount - excludedContactIds.length - invalidPhoneContacts.length) : null;
 
   const addTag = () => {
-    if (newTag.trim() && !criteria.tags.includes(newTag.trim())) {
+    if (newTag.trim() && !(criteria.tags ?? []).includes(newTag.trim())) {
       setCriteria(prev => ({
         ...prev,
-        tags: [...prev.tags, newTag.trim()]
+        tags: [...(prev.tags ?? []), newTag.trim()]
       }));
       setNewTag('');
     }
@@ -298,7 +294,7 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
   const removeTag = (tagToRemove: string) => {
     setCriteria(prev => ({
       ...prev,
-      tags: prev.tags.filter(tag => tag !== tagToRemove)
+      tags: (prev.tags ?? []).filter(tag => tag !== tagToRemove)
     }));
   };
 
@@ -325,8 +321,7 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
           criteria: {
             ...criteria,
             excludedContactIds
-          },
-          excludedContactIds
+          }
         })
       });
 
@@ -502,9 +497,9 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
                   </Button>
                 </div>
 
-                {criteria.tags.length > 0 && (
+                {(criteria.tags?.length ?? 0) > 0 && (
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {criteria.tags.map((tag) => (
+                    {(criteria.tags ?? []).map((tag) => (
                       <Badge key={tag} variant="secondary" className="flex items-center gap-1">
                         <Tag className="w-3 h-3" />
                         {tag}
@@ -561,15 +556,18 @@ export function EditSegmentModal({ isOpen, onClose, segmentId, onSegmentUpdated 
                 {effectiveContactCount !== null && (
                   <div className="text-sm text-muted-foreground">
                     {hasMoreContacts ? (
-                      <>{t('segments.edit.showing_first_50', 'Showing first 50 of')} <strong>{effectiveContactCount}</strong> {t('segments.edit.contacts', 'contacts')}</>
+                      <>{t('segments.edit.showing_first_50', 'Showing first 50 of')} <strong>{effectiveContactCount}</strong> {t('segments.edit.unique_contacts', 'unique contacts')}</>
                     ) : (
-                      <><strong>{effectiveContactCount}</strong> {t('segments.edit.contacts_match_criteria', 'contacts match these criteria')}</>
+                      <><strong>{effectiveContactCount}</strong> {t('segments.edit.unique_contacts_match_criteria', 'unique contacts match these criteria')}</>
                     )}
                     {excludedContactIds.length > 0 && (
                       <span className="text-orange-600 ml-2">
                         ({excludedContactIds.length} {t('segments.edit.excluded', 'excluded')})
                       </span>
                     )}
+                    <div className="text-xs text-muted-foreground mt-1">
+                      {t('segments.edit.deduplication_note', 'Note: Duplicates by phone number are automatically removed. Counts reflect unique phone numbers.')}
+                    </div>
                   </div>
                 )}
               </div>

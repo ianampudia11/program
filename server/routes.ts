@@ -4,6 +4,7 @@ import {
   insertChannelConnectionSchema,
   InsertContact,
   insertContactSchema,
+  InsertContactTask,
   InsertConversation,
   insertConversationSchema,
   insertFlowAssignmentSchema,
@@ -12,12 +13,16 @@ import {
   insertNoteSchema,
   invitationStatusTypes,
   messages,
+  scheduledMessages,
   PERMISSIONS,
-  User
+  User,
+  campaignTemplates
 } from "@shared/schema";
 import crypto, { randomBytes, scrypt, timingSafeEqual } from "crypto";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
+import { EventEmitter } from "events";
 import type { Express, Request, Response } from "express";
+import type { NextFunction } from "express";
 import express from "express";
 import axios from "axios";
 import fs from "fs";
@@ -25,6 +30,7 @@ import fsExtra from "fs-extra";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import path from "path";
+import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
@@ -34,6 +40,8 @@ import { setupSocialAuth } from "./social-auth";
 import { db } from "./db";
 import { setupLanguageRoutes } from "./language-routes";
 import { ensureAuthenticated, getUserPermissions, requireAnyPermission, requirePermission, ensureActiveSubscription, apiSubscriptionGuard } from "./middleware";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 import { affiliateTrackingMiddleware } from "./middleware/affiliate-tracking";
 import { requireSubdomainAuth, subdomainMiddleware } from "./middleware/subdomain";
@@ -62,10 +70,13 @@ import companyAiCredentialsRoutes from "./routes/company-ai-credentials";
 import companyDataUsageRoutes from "./routes/company-data-usage";
 import quickReplyRoutes from "./routes/quick-replies";
 import openRouterRoutes from "./routes/openrouter";
+import whatsappTemplatesRoutes from "./routes/whatsapp-templates";
 import instagramService from "./services/channels/instagram";
 import telegramService from "./services/channels/telegram";
 import messengerService from "./services/channels/messenger";
+import TikTokService from "./services/channels/tiktok";
 import emailService from "./services/channels/email";
+import webchatService from "./services/channels/webchat";
 import whatsAppService, { downloadAndSaveMedia, getConnection as getWhatsAppConnection } from "./services/channels/whatsapp";
 import whatsAppOfficialService from "./services/channels/whatsapp-official";
 import whatsAppTwilioService from "./services/channels/whatsapp-twilio";
@@ -118,9 +129,26 @@ const validateBody = (schema: any, body: any) => {
   return result.data;
 };
 
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+
+function getWidgetsBasePath(): string {
+  if (process.env.NODE_ENV === 'production') {
+    return path.resolve(__dirname, 'widgets');
+  }
+  return path.resolve(process.cwd(), 'server', 'widgets');
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   await setupAuth(app);
   setupSocialAuth(app);
+
+
+  if (!(global as any).flowAssignmentEventEmitter) {
+    (global as any).flowAssignmentEventEmitter = new EventEmitter();
+  }
 
   app.get('/public/branding', async (req, res) => {
 
@@ -135,7 +163,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
 
 
-      res.set('Cache-Control', 'public, max-age=300');
+      res.set('Cache-Control', 'public, max-age=60');
       res.json(brandingSettings);
 
     } catch (error) {
@@ -323,6 +351,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.use('/api/campaigns', requireSubdomainAuth, ensureAuthenticated, campaignRoutes);
 
+
+  app.use('/api/webchat', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+    next();
+  });
+
   app.use('/api/templates', templateMediaRoutes);
 
   app.use('/api/auto-update', autoUpdateRoutes);
@@ -354,11 +394,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         subdomainAuthentication: settingsValue?.subdomainAuthentication || false,
         frontendWebsiteEnabled: settingsValue?.frontendWebsiteEnabled || false,
         planRenewalEnabled: settingsValue?.planRenewalEnabled !== undefined ? settingsValue.planRenewalEnabled : true,
-        helpSupportUrl: settingsValue?.helpSupportUrl || ''
+        helpSupportUrl: settingsValue?.helpSupportUrl || '',
+        customCurrencies: settingsValue?.customCurrencies || []
       };
 
 
-      res.set('Cache-Control', 'public, max-age=300');
+      res.set('Cache-Control', 'public, max-age=60');
       res.json(publicSettings);
     } catch (error) {
       console.error('Error fetching general settings:', error);
@@ -370,7 +411,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         subdomainAuthentication: false,
         frontendWebsiteEnabled: false,
         planRenewalEnabled: true, // Default to enabled for safety
-        helpSupportUrl: ''
+        helpSupportUrl: '',
+        customCurrencies: []
       });
     }
   });
@@ -397,13 +439,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
 
-    console.log('Messenger webhook verification attempt:', {
-      mode,
-      token: token ? `${token.toString().substring(0, 8)}...` : 'undefined',
-      challenge: challenge ? `${challenge.toString().substring(0, 8)}...` : 'undefined',
-      userAgent: req.get('User-Agent'),
-      ip: req.ip
-    });
+   
 
     if (mode !== 'subscribe') {
       return res.status(403).send('Forbidden');
@@ -427,15 +463,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (matchingConnection || isGlobalMatch) {
         res.status(200).send(challenge);
       } else {
-        console.log('❌ Messenger webhook verification failed:', {
-          receivedToken: token,
-          globalToken: globalToken,
-          checkedConnections: messengerConnections.length,
-          availableTokens: messengerConnections.map(conn => {
-            const data = conn.connectionData as any;
-            return data?.verifyToken ? `${data.verifyToken.substring(0, 8)}...` : 'none';
-          })
-        });
+        
         res.status(403).send('Forbidden');
       }
     } catch (error) {
@@ -449,15 +477,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const signature = req.headers['x-hub-signature-256'] as string;
       const body = req.body;
 
-      console.log('Messenger webhook received:', {
-        hasSignature: !!signature,
-        bodyType: typeof body,
-        contentType: req.get('content-type'),
-        headers: {
-          'x-hub-signature-256': signature ? 'present' : 'missing',
-          'user-agent': req.get('user-agent')
-        }
-      });
+     
 
       let targetConnection = null;
       let pageId: string | null = null;
@@ -472,15 +492,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (pageId) {
           const messengerConnections = await storage.getChannelConnectionsByType('messenger');
 
-          console.log('Available Messenger connections:', {
-            count: messengerConnections.length,
-            connections: messengerConnections.map(conn => ({
-              id: conn.id,
-              accountName: conn.accountName,
-              pageId: (conn.connectionData as any)?.pageId,
-              companyId: conn.companyId
-            }))
-          });
+       
 
           targetConnection = messengerConnections.find((conn: any) => {
             const connectionData = conn.connectionData as any;
@@ -540,11 +552,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.use('/api/email-templates', ensureAuthenticated, emailTemplateRoutes);
 
-  app.use('/api', ensureAuthenticated, flowVariablesRoutes);
+
+  app.use('/api/flow-variables', ensureAuthenticated, flowVariablesRoutes);
 
   app.use('/api/email-signatures', ensureAuthenticated, emailSignatureRoutes);
 
   app.use('/api/quick-replies', ensureAuthenticated, quickReplyRoutes);
+
+  app.use('/api/whatsapp-templates', ensureAuthenticated, whatsappTemplatesRoutes);
 
   app.use('/api/enhanced-subscription', enhancedSubscriptionRoutes);
 
@@ -730,6 +745,380 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+
+  const ensureCompanyAdmin = (req: any, res: Response, next: any) => {
+    try {
+      if (!req.isAuthenticated() || !req.user) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      const user = req.user as any;
+      if (!user.companyId) {
+        return res.status(400).json({ error: 'Company ID is required' });
+      }
+      if (user.isSuperAdmin || user.role === 'admin') {
+        return next();
+      }
+      return res.status(403).json({ error: 'Admin access required' });
+    } catch (e) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  };
+
+
+  app.get('/api/company-settings/whatsapp-proxy', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const companyId = req.user.companyId;
+      const cfg = await storage.getWhatsAppProxyConfig(companyId);
+      res.json(cfg || null);
+    } catch (error: any) {
+      console.error('Error fetching WhatsApp proxy config:', error);
+      res.status(500).json({ error: error?.message || 'Failed to fetch proxy config' });
+    }
+  });
+
+
+  app.put('/api/company-settings/whatsapp-proxy', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const companyId = req.user.companyId;
+      const { enabled, type, host, port, username, password, testStatus, lastTested } = req.body || {};
+
+
+      const allowedTypes = ['http', 'https', 'socks5'];
+      if (enabled === true) {
+        if (!type || !allowedTypes.includes(String(type).toLowerCase())) {
+          return res.status(400).json({ error: 'Invalid proxy type. Allowed: http, https, socks5' });
+        }
+        if (!host || typeof host !== 'string' || host.trim().length === 0) {
+          return res.status(400).json({ error: 'Proxy host is required' });
+        }
+        const p = Number(port);
+        if (!Number.isInteger(p) || p < 1 || p > 65535) {
+          return res.status(400).json({ error: 'Proxy port must be an integer between 1 and 65535' });
+        }
+      }
+
+      const cfgToSave: any = {
+        enabled: Boolean(enabled),
+        type: type ? String(type).toLowerCase() : 'http',
+        host: host || '',
+        port: port !== undefined && port !== null && port !== '' ? Number(port) : 0,
+        username: (username === null || username === undefined || username === '') ? null : String(username),
+        password: (password === null || password === undefined || password === '') ? null : String(password),
+        testStatus: (testStatus === 'working' || testStatus === 'failed' || testStatus === 'untested') ? testStatus : 'untested',
+        lastTested: lastTested ? new Date(lastTested) : null
+      };
+
+      const saved = await storage.saveWhatsAppProxyConfig(companyId, cfgToSave);
+      res.json(saved);
+    } catch (error: any) {
+      console.error('Error saving WhatsApp proxy config:', error);
+      res.status(500).json({ error: error?.message || 'Failed to save proxy config' });
+    }
+  });
+
+
+  app.post('/api/company-settings/whatsapp-proxy/test', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const { type, host, port, username, password } = req.body || {};
+      const allowedTypes = ['http', 'https', 'socks5'];
+      if (!type || !allowedTypes.includes(String(type).toLowerCase())) {
+        return res.status(400).json({ success: false, status: 'failed', error: 'Invalid proxy type' });
+      }
+      if (!host || typeof host !== 'string' || host.trim().length === 0) {
+        return res.status(400).json({ success: false, status: 'failed', error: 'Proxy host is required' });
+      }
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        return res.status(400).json({ success: false, status: 'failed', error: 'Proxy port must be 1-65535' });
+      }
+
+      const t = String(type).toLowerCase();
+      const userEnc = encodeURIComponent(username || '');
+      const passEnc = encodeURIComponent(password || '');
+      const url = (username && password)
+        ? `${t}://${userEnc}:${passEnc}@${host}:${p}`
+        : `${t}://${host}:${p}`;
+
+      const agent = (t === 'socks5') ? new SocksProxyAgent(url) : new HttpsProxyAgent(url);
+
+      const response = await axios.get('https://web.whatsapp.com', {
+        httpAgent: agent as any,
+        httpsAgent: agent as any,
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: (s) => s >= 200 && s < 400,
+      });
+
+      if (response && response.status < 400) {
+        return res.json({ success: true, status: 'working', message: 'Proxy connection successful' });
+      }
+
+      return res.status(400).json({ success: false, status: 'failed', error: 'Non-success status from target site' });
+    } catch (error: any) {
+      console.error('Error testing company proxy:', error);
+      return res.status(400).json({ success: false, status: 'failed', error: error?.message || 'Proxy test failed' });
+    }
+  });
+
+
+
+  app.get('/api/whatsapp-proxy-servers', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const companyId = req.user.companyId;
+      const servers = await storage.getWhatsappProxyServers(companyId);
+      res.json(servers);
+    } catch (error: any) {
+      console.error('Error fetching proxy servers:', error);
+      res.status(500).json({ error: error?.message || 'Failed to fetch proxy servers' });
+    }
+  });
+
+
+  app.get('/api/whatsapp-proxy-servers/:id', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid proxy server ID' });
+      }
+
+      const server = await storage.getWhatsappProxyServer(id);
+      if (!server) {
+        return res.status(404).json({ error: 'Proxy server not found' });
+      }
+
+      if (server.companyId !== req.user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      res.json(server);
+    } catch (error: any) {
+      console.error('Error fetching proxy server:', error);
+      res.status(500).json({ error: error?.message || 'Failed to fetch proxy server' });
+    }
+  });
+
+
+  app.post('/api/whatsapp-proxy-servers', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const { name, enabled, type, host, port, username, password, description } = req.body;
+
+
+      if (!name || typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({ error: 'Proxy name is required' });
+      }
+
+      const allowedTypes = ['http', 'https', 'socks5'];
+      if (!type || !allowedTypes.includes(String(type).toLowerCase())) {
+        return res.status(400).json({ error: 'Invalid proxy type. Allowed: http, https, socks5' });
+      }
+
+      if (!host || typeof host !== 'string' || host.trim().length === 0) {
+        return res.status(400).json({ error: 'Proxy host is required' });
+      }
+
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        return res.status(400).json({ error: 'Proxy port must be between 1 and 65535' });
+      }
+
+      const proxyData = {
+        companyId: req.user.companyId,
+        name: name.trim(),
+        enabled: enabled !== undefined ? Boolean(enabled) : true,
+        type: String(type).toLowerCase(),
+        host: host.trim(),
+        port: p,
+        username: username || null,
+        password: password || null,
+        description: description || null
+      };
+
+      const created = await storage.createWhatsappProxyServer(proxyData);
+      res.status(201).json(created);
+    } catch (error: any) {
+      console.error('Error creating proxy server:', error);
+      res.status(500).json({ error: error?.message || 'Failed to create proxy server' });
+    }
+  });
+
+
+  app.put('/api/whatsapp-proxy-servers/:id', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid proxy server ID' });
+      }
+
+      const server = await storage.getWhatsappProxyServer(id);
+      if (!server) {
+        return res.status(404).json({ error: 'Proxy server not found' });
+      }
+
+      if (server.companyId !== req.user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const { name, enabled, type, host, port, username, password, testStatus, lastTested, description } = req.body;
+
+
+      if (type !== undefined) {
+        const allowedTypes = ['http', 'https', 'socks5'];
+        if (!allowedTypes.includes(String(type).toLowerCase())) {
+          return res.status(400).json({ error: 'Invalid proxy type' });
+        }
+      }
+
+      if (port !== undefined) {
+        const p = Number(port);
+        if (!Number.isInteger(p) || p < 1 || p > 65535) {
+          return res.status(400).json({ error: 'Proxy port must be between 1 and 65535' });
+        }
+      }
+
+      const updates: any = {};
+      if (name !== undefined) updates.name = String(name).trim();
+      if (enabled !== undefined) updates.enabled = Boolean(enabled);
+      if (type !== undefined) updates.type = String(type).toLowerCase();
+      if (host !== undefined) updates.host = String(host).trim();
+      if (port !== undefined) updates.port = Number(port);
+      if (username !== undefined) updates.username = username || null;
+      if (password !== undefined) updates.password = password || null;
+      if (testStatus !== undefined) updates.testStatus = testStatus;
+      if (lastTested !== undefined) updates.lastTested = lastTested ? new Date(lastTested) : null;
+      if (description !== undefined) updates.description = description || null;
+
+      const updated = await storage.updateWhatsappProxyServer(id, updates);
+      res.json(updated);
+    } catch (error: any) {
+      console.error('Error updating proxy server:', error);
+      res.status(500).json({ error: error?.message || 'Failed to update proxy server' });
+    }
+  });
+
+
+  app.delete('/api/whatsapp-proxy-servers/:id', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid proxy server ID' });
+      }
+
+      const server = await storage.getWhatsappProxyServer(id);
+      if (!server) {
+        return res.status(404).json({ error: 'Proxy server not found' });
+      }
+
+      if (server.companyId !== req.user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      await storage.deleteWhatsappProxyServer(id);
+      res.json({ success: true, message: 'Proxy server deleted successfully' });
+    } catch (error: any) {
+      console.error('Error deleting proxy server:', error);
+      res.status(500).json({ error: error?.message || 'Failed to delete proxy server' });
+    }
+  });
+
+
+  app.post('/api/whatsapp-proxy-servers/:id/test', ensureAuthenticated, ensureCompanyAdmin, async (req: any, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ success: false, error: 'Invalid proxy server ID', status: 'failed' });
+      }
+
+      const server = await storage.getWhatsappProxyServer(id);
+      if (!server) {
+        return res.status(404).json({ success: false, error: 'Proxy server not found', status: 'failed' });
+      }
+
+      if (server.companyId !== req.user.companyId) {
+        return res.status(403).json({ success: false, error: 'Access denied', status: 'failed' });
+      }
+
+      const t = String(server.type).toLowerCase();
+      const userEnc = encodeURIComponent(server.username || '');
+      const passEnc = encodeURIComponent(server.password || '');
+      const url = (server.username && server.password)
+        ? `${t}://${userEnc}:${passEnc}@${server.host}:${server.port}`
+        : `${t}://${server.host}:${server.port}`;
+
+      const agent = (t === 'socks5') ? new SocksProxyAgent(url) : new HttpsProxyAgent(url);
+
+      try {
+        const response = await axios.get('https://web.whatsapp.com', {
+          httpAgent: agent as any,
+          httpsAgent: agent as any,
+          timeout: 10000,
+          maxRedirects: 5,
+          validateStatus: (s) => s >= 200 && s < 400,
+        });
+
+        if (response && response.status < 400) {
+          await storage.updateWhatsappProxyServer(id, {
+            testStatus: 'working',
+            lastTested: new Date()
+          });
+          return res.json({ success: true, status: 'working', message: 'Proxy connection successful' });
+        }
+
+        await storage.updateWhatsappProxyServer(id, {
+          testStatus: 'failed',
+          lastTested: new Date()
+        });
+        return res.status(400).json({ success: false, status: 'failed', error: 'Non-success status from target site' });
+      } catch (err: any) {
+        await storage.updateWhatsappProxyServer(id, {
+          testStatus: 'failed',
+          lastTested: new Date()
+        });
+        return res.status(400).json({ success: false, status: 'failed', error: err?.message || 'Proxy test failed' });
+      }
+    } catch (error: any) {
+      console.error('Error testing proxy server:', error);
+      return res.status(500).json({ success: false, error: error?.message || 'Internal server error', status: 'failed' });
+    }
+  });
+
+
+  app.put('/api/channel-connections/:id/proxy', ensureAuthenticated, async (req: any, res: Response) => {
+    try {
+      const connectionId = parseInt(req.params.id);
+      if (isNaN(connectionId)) {
+        return res.status(400).json({ error: 'Invalid connection ID' });
+      }
+
+      const connection = await storage.getChannelConnection(connectionId);
+      if (!connection) {
+        return res.status(404).json({ error: 'Connection not found' });
+      }
+
+      const user = req.user as any;
+      if (!user.isSuperAdmin && connection.userId !== user.id && connection.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const { proxyServerId } = req.body;
+
+      if (proxyServerId !== null && proxyServerId !== undefined) {
+        const proxyServer = await storage.getWhatsappProxyServer(proxyServerId);
+        if (!proxyServer || proxyServer.companyId !== connection.companyId) {
+          return res.status(400).json({ error: 'Invalid proxy server' });
+        }
+      }
+
+      const updated = await storage.updateChannelConnection(connectionId, {
+        proxyServerId: proxyServerId || null
+      });
+
+      res.json(updated);
+    } catch (error: any) {
+      console.error('Error updating connection proxy:', error);
+      res.status(500).json({ error: error?.message || 'Failed to update connection proxy' });
+    }
+  });
+
   app.post('/api/settings/api-keys', ensureAuthenticated, async (req: any, res) => {
     try {
       const { name } = req.body;
@@ -859,9 +1248,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const browserNotificationSetting = await storage.getCompanySetting(companyId, 'inbox_browser_notifications');
       const browserNotifications = browserNotificationSetting?.value || false;
 
+      const agentSignatureSetting = await storage.getCompanySetting(companyId, 'inbox_agent_signature_enabled');
+      const agentSignatureEnabled = agentSignatureSetting?.value !== undefined ? agentSignatureSetting.value : true;
+
       res.json({
         showGroupChats,
-        browserNotifications
+        browserNotifications,
+        agentSignatureEnabled
       });
     } catch (error) {
       console.error('Error fetching inbox settings:', error);
@@ -872,7 +1265,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch('/api/settings/inbox', ensureAuthenticated, async (req: any, res) => {
     try {
       const companyId = req.user.companyId;
-      const { showGroupChats, browserNotifications } = req.body;
+      const { showGroupChats, browserNotifications, agentSignatureEnabled } = req.body;
 
 
       if (showGroupChats !== undefined) {
@@ -891,22 +1284,314 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
 
+      if (agentSignatureEnabled !== undefined) {
+        if (typeof agentSignatureEnabled !== 'boolean') {
+          return res.status(400).json({ error: 'agentSignatureEnabled must be a boolean value' });
+        }
+        await storage.saveCompanySetting(companyId, 'inbox_agent_signature_enabled', agentSignatureEnabled);
+      }
+
+
       const groupChatSetting = await storage.getCompanySetting(companyId, 'inbox_show_group_chats');
       const currentShowGroupChats = groupChatSetting?.value || false;
 
       const browserNotificationSetting = await storage.getCompanySetting(companyId, 'inbox_browser_notifications');
       const currentBrowserNotifications = browserNotificationSetting?.value || false;
 
+      const agentSignatureSetting = await storage.getCompanySetting(companyId, 'inbox_agent_signature_enabled');
+      const currentAgentSignatureEnabled = agentSignatureSetting?.value !== undefined ? agentSignatureSetting.value : true;
+
       res.json({
         success: true,
         showGroupChats: currentShowGroupChats,
-        browserNotifications: currentBrowserNotifications
+        browserNotifications: currentBrowserNotifications,
+        agentSignatureEnabled: currentAgentSignatureEnabled
       });
     } catch (error) {
       console.error('Error updating inbox settings:', error);
       res.status(500).json({ error: 'Failed to update inbox settings' });
     }
   });
+
+
+  app.get('/api/webchat/preview/:token', async (req: Request, res: Response) => {
+    const token = req.params.token;
+    try {
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) {
+        return res.status(404).send('<!DOCTYPE html><html><body><h2>Invalid WebChat token</h2></body></html>');
+      }
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 20px; background: #f3f4f6; }
+    .preview-info { max-width: 800px; margin: 0 auto 20px; padding: 15px; background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .preview-info h2 { margin: 0 0 10px; font-size: 18px; }
+    .preview-info p { margin: 0; color: #6b7280; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <script src="/api/webchat/widget.js?token=${token}" async></script>
+</body>
+</html>`;
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } catch (e) {
+      res.status(500).send('<!DOCTYPE html><html><body><h2>WebChat preview error</h2></body></html>');
+    }
+  });
+
+
+  app.get('/api/webchat/embed/:token', async (req: Request, res: Response) => {
+    const token = req.params.token;
+    try {
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) {
+        return res.status(404).send('<!DOCTYPE html><html><body><h2>Invalid WebChat token</h2></body></html>');
+      }
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; background: transparent; }
+  </style>
+</head>
+<body>
+  <script src="/api/webchat/widget.js?token=${token}" async></script>
+</body>
+</html>`;
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } catch (e) {
+      res.status(500).send('<!DOCTYPE html><html><body><h2>WebChat embed error</h2></body></html>');
+    }
+  });
+
+
+  app.get('/api/webchat/widget.js', async (req: Request, res: Response) => {
+    try {
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      
+      const widgetJsPath = path.join(getWidgetsBasePath(), 'webchat-widget.js');
+      if (await fsExtra.pathExists(widgetJsPath)) {
+        res.setHeader('Content-Type', 'application/javascript');
+        res.sendFile(widgetJsPath);
+      } else {
+        res.status(404).send('// Widget JavaScript file not found');
+      }
+    } catch (e) {
+      res.status(500).send('// Error loading widget JavaScript');
+    }
+  });
+
+
+  app.get('/api/webchat/widget/:token', async (req: Request, res: Response) => {
+    const token = req.params.token;
+    try {
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) {
+        return res.status(404).send('// Invalid WebChat token');
+      }
+      
+
+      const redirectUrl = `/api/webchat/widget.js?token=${encodeURIComponent(token)}`;
+      res.redirect(302, redirectUrl);
+    } catch (e) {
+      res.status(500).send('// Error loading widget');
+    }
+  });
+
+
+  app.get('/api/webchat/widget/:token/legacy', async (req: Request, res: Response) => {
+    const token = req.params.token;
+    try {
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) {
+        return res.status(404).send('// Invalid WebChat token');
+      }
+      
+
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      
+
+      const widgetJsPath = path.join(getWidgetsBasePath(), 'webchat-widget.js');
+      if (await fsExtra.pathExists(widgetJsPath)) {
+        let script = await fsExtra.readFile(widgetJsPath, 'utf-8');
+
+        script = script.replace('__TOKEN__', token);
+        res.setHeader('Content-Type', 'application/javascript');
+        res.send(script);
+      } else {
+
+        if (process.env.NODE_ENV === 'production') {
+          logger.error('webchat', 'Widget JS not found at', widgetJsPath);
+        }
+
+        const script = `(()=>{const TOKEN=${JSON.stringify(token)};const API=location.origin;const s=document.createElement('style');s.textContent=` +
+          JSON.stringify(`
+.pc-widget-button{position:fixed;right:20px;bottom:20px;background:#6366f1;color:#fff;border-radius:9999px;padding:12px 16px;font:14px/1.2 system-ui,Segoe UI,Arial;box-shadow:0 6px 20px rgba(0,0,0,.15);cursor:pointer;z-index:2147483000}
+.pc-widget-window{position:fixed;right:20px;bottom:76px;width:320px;max-width:95vw;height:420px;max-height:70vh;background:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.2);display:none;flex-direction:column;overflow:hidden;z-index:2147483000}
+.pc-widget-header{background:#6366f1;color:#fff;padding:10px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.pc-widget-messages{flex:1;overflow:auto;padding:10px;background:#f8fafc}
+.pc-widget-input{display:flex;gap:6px;padding:8px;border-top:1px solid #e5e7eb}
+.pc-widget-input input{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:8px}
+.pc-msg{max-width:80%;margin:6px 0;padding:8px 10px;border-radius:10px;font:13px/1.35 system-ui,Segoe UI,Arial;white-space:pre-wrap}
+.pc-in{background:#fff;border:1px solid #e5e7eb}
+.pc-out{background:#eef2ff;color:#111827;margin-left:auto}
+`) + `;document.head.appendChild(s);
+const btn=document.createElement('button');btn.className='pc-widget-button';btn.textContent='Chat';document.body.appendChild(btn);
+const win=document.createElement('div');win.className='pc-widget-window';win.innerHTML=` + JSON.stringify(`
+  <div class="pc-widget-header">Chat <span id="pc-close" style="cursor:pointer;opacity:.9">✕</span></div>
+  <div id="pc-messages" class="pc-widget-messages"></div>
+  <div class="pc-widget-input">
+    <input id="pc-input" placeholder="Type a message" />
+    <button id="pc-send">Send</button>
+  </div>
+`) + `;document.body.appendChild(win);
+const elMsgs=win.querySelector('#pc-messages');
+const elInput=win.querySelector('#pc-input');
+const elSend=win.querySelector('#pc-send');
+const elClose=win.querySelector('#pc-close');
+const SID_KEY='pc_webchat_sid_'+TOKEN;let sid=localStorage.getItem(SID_KEY);let pollInterval=null;let lastPoll=null;const shownMsgIds=new Set();
+async function ensureSession(){if(!sid){const r=await fetch(API+'/api/webchat/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN})});const j=await r.json();sid=j.sessionId;localStorage.setItem(SID_KEY,sid);}}
+function push(type,content,msgId){if(msgId&&shownMsgIds.has(msgId))return;const div=document.createElement('div');div.className='pc-msg '+(type==='out'?'pc-out':'pc-in');div.textContent=content;elMsgs.appendChild(div);elMsgs.scrollTop=elMsgs.scrollHeight;if(msgId)shownMsgIds.add(msgId);}
+async function pollMessages(){if(!sid)return;try{const url=API+'/api/webchat/messages/'+sid+'?token='+TOKEN+(lastPoll?'&since='+lastPoll:'');const r=await fetch(url);const data=await r.json();if(data.messages){data.messages.forEach(m=>{if(m.direction==='outbound'&&m.content){push('in',m.content,m.id);}});if(data.timestamp)lastPoll=data.timestamp;}}catch(e){}}
+function startPolling(){if(pollInterval)return;pollMessages();pollInterval=setInterval(pollMessages,3000);}
+function stopPolling(){if(pollInterval){clearInterval(pollInterval);pollInterval=null;}}
+btn.onclick=()=>{win.style.display=win.style.display==='flex'?'none':'flex';if(win.style.display==='flex'){ensureSession().then(startPolling);}else{stopPolling();}}
+elClose.onclick=()=>{win.style.display='none';stopPolling();}
+elSend.onclick=async()=>{const v=(elInput).value.trim();if(!v)return;push('out',v);(elInput).value='';await ensureSession();try{await fetch(API+'/api/webchat/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,sessionId:sid,message:v,messageType:'text'})});}catch(e){}}
+})();`;
+        res.setHeader('Content-Type', 'application/javascript');
+        res.send(script);
+      }
+    } catch (e) {
+      res.setHeader('Content-Type', 'application/javascript');
+      res.status(500).send('// WebChat widget error');
+    }
+  });
+
+
+  app.get('/api/webchat/config/:token', async (req: Request, res: Response) => {
+    try {
+      const token = req.params.token;
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) return res.status(404).json({ error: 'Not found' });
+      const data = (connection.connectionData || {}) as any;
+      
+
+      const teamAvatars = [];
+      if (connection.companyId) {
+        const users = await storage.getUsersByCompany(connection.companyId);
+
+        for (const user of users.slice(0, 3)) {
+          teamAvatars.push({
+            fullName: user.fullName,
+            avatarUrl: user.avatarUrl,
+            initials: user.fullName?.split(' ').map((n: string) => n[0]).join('') || 'U'
+          });
+        }
+      }
+      
+      const cfg = {
+        token,
+        widgetColor: data.widgetColor || '#6366f1',
+        welcomeMessage: data.welcomeMessage || 'Hi! How can we help?',
+        position: data.position || 'bottom-right',
+        showAvatar: data.showAvatar !== false,
+        companyName: data.companyName || 'Support',
+        allowFileUpload: !!data.allowFileUpload,
+        collectEmail: !!data.collectEmail,
+        collectName: data.collectName !== false,
+        teamAvatars,
+      };
+      res.json(cfg);
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to load config' });
+    }
+  });
+
+
+  app.post('/api/webchat/session', async (req: Request, res: Response) => {
+    try {
+      const { token, visitorName, visitorEmail, visitorPhone, metadata } = req.body || {};
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) return res.status(401).json({ error: 'Invalid token' });
+      const sessionId = 's_' + crypto.randomBytes(16).toString('hex');
+      await webchatService.registerSession(connection.id, connection.companyId, sessionId, visitorName, visitorEmail, visitorPhone);
+
+      await webchatService.processWebhook({
+        token,
+        eventType: 'session_start',
+        data: { sessionId, visitorName, visitorEmail, visitorPhone, metadata }
+      }, connection.companyId);
+      res.json({ sessionId });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to initialize session' });
+    }
+  });
+
+
+  app.post('/api/webchat/message', async (req: Request, res: Response) => {
+    try {
+      const payload = req.body || {};
+      const { token, sessionId, message, messageType, visitorName, visitorEmail } = payload;
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) return res.status(401).json({ error: 'Invalid token' });
+      const savedMessage = await webchatService.processWebhook({
+        token,
+        eventType: 'message',
+        data: { sessionId, message, messageType, visitorName, visitorEmail }
+      }, connection.companyId);
+
+      res.json({
+        success: true,
+        message: savedMessage ? {
+          id: savedMessage.id,
+          createdAt: savedMessage.createdAt,
+          sentAt: savedMessage.sentAt
+        } : null
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || 'Failed to process message' });
+    }
+  });
+
+
+  app.get('/api/webchat/messages/:sessionId', async (req: Request, res: Response) => {
+    try {
+      const sessionId = req.params.sessionId;
+      const token = String(req.query.token || '');
+      const connection = await webchatService.verifyWidgetToken(token);
+      if (!connection) return res.status(401).json({ error: 'Invalid token' });
+
+
+      const contact = await storage.getContactByIdentifier?.(sessionId, 'webchat');
+      if (!contact) return res.json({ messages: [] });
+      const conversation = await storage.getConversationByContactAndChannel(contact.id, connection.id);
+      if (!conversation) return res.json({ messages: [] });
+
+      const all = await storage.getMessagesByConversationPaginated(conversation.id, 50, 0);
+
+      const since = req.query.since ? new Date(String(req.query.since)) : null;
+      const filtered = since ? all.filter((x: any) => new Date(x.createdAt) > since) : all;
+      res.json({ messages: filtered.reverse(), timestamp: new Date().toISOString() });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to fetch messages' });
+    }
+  });
+
 
   app.get('/api/users/me', async (req, res) => {
     if (!req.isAuthenticated()) {
@@ -1482,6 +2167,108 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const upload = createSecureUpload();
 
 
+
+
+  const WEBCHAT_UPLOAD_DIR = path.join(UPLOAD_DIR, 'webchat');
+  fsExtra.ensureDirSync(WEBCHAT_UPLOAD_DIR);
+  const webchatUpload = createSecureUpload({ destination: WEBCHAT_UPLOAD_DIR });
+
+
+
+  const validateWebchatUploadToken = async (req: Request, res: Response, next: NextFunction) => {
+    const { token } = req.body;
+    if (!token) {
+
+      if (req.file) {
+        try {
+          await fsExtra.remove(req.file.path);
+        } catch (e) {
+
+        }
+      }
+      return res.status(400).json({ error: 'Token is required' });
+    }
+    const connection = await webchatService.verifyWidgetToken(token);
+    if (!connection) {
+
+      if (req.file) {
+        try {
+          await fsExtra.remove(req.file.path);
+        } catch (e) {
+
+        }
+      }
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    (req as any).webchatConnection = connection;
+    next();
+  };
+
+  app.post('/api/webchat/upload', webchatUpload.single('file'), validateWebchatUploadToken, async (req: Request, res: Response) => {
+    try {
+      const { token, sessionId, caption } = req.body;
+      const connection = (req as any).webchatConnection;
+      if (!connection) return res.status(401).json({ error: 'Invalid token' });
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const mediaUrl = `/uploads/webchat/${req.file.filename}`;
+      const isImage = req.file.mimetype.startsWith('image/');
+      const isVideo = req.file.mimetype.startsWith('video/');
+      
+
+      const content = caption || '';
+      
+      const saved: any = await webchatService.processWebhook({
+        token,
+        eventType: 'message',
+        data: { 
+          sessionId, 
+          message: content, 
+          messageType: isImage ? 'image' : isVideo ? 'video' : 'document',
+          mediaUrl 
+        }
+      }, connection.companyId);
+
+      res.json({ success: true, mediaUrl, message: saved });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || 'Failed to upload file' });
+    }
+  });
+
+
+  app.get('/api/webchat/widget.html', async (req: Request, res: Response) => {
+    try {
+      const widgetPath = path.join(getWidgetsBasePath(), 'webchat-widget.html');
+      if (await fsExtra.pathExists(widgetPath)) {
+        res.sendFile(widgetPath);
+      } else {
+        res.status(404).send('Widget HTML not found');
+      }
+    } catch (e) {
+      res.status(500).send('Error loading widget HTML');
+    }
+  });
+
+
+  app.get('/api/webchat/widget.css', async (req: Request, res: Response) => {
+    logger.warn('webchat', 'DEPRECATED: /api/webchat/widget.css endpoint is deprecated. Use /public/webchat/widget.css for better caching/CDN support. This endpoint will be removed in a future release.');
+    try {
+      const cssPath = path.join(getWidgetsBasePath(), 'webchat-widget.css');
+      if (await fsExtra.pathExists(cssPath)) {
+        res.setHeader('Content-Type', 'text/css');
+        res.sendFile(cssPath);
+      } else {
+        res.status(404).send('Widget CSS not found');
+      }
+    } catch (e) {
+      res.status(500).send('Error loading widget CSS');
+    }
+  });
+
   app.post('/api/users/me/avatar', ensureAuthenticated, upload.single('avatar'), async (req, res) => {
     try {
       const userId = req.user?.id;
@@ -1528,7 +2315,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (message.mediaUrl) {
         const mediaPath = path.join(process.cwd(), 'public', message.mediaUrl.substring(1));
         if (await fsExtra.pathExists(mediaPath)) {
-          return res.status(200).json({ mediaUrl: message.mediaUrl });
+          const fetchedAt = Date.now();
+          res.setHeader('X-Media-Fetched-At', fetchedAt.toString());
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          return res.status(200).json({ 
+            mediaUrl: message.mediaUrl,
+            fetchedAt,
+            cacheHint: 'local'
+          });
         }
       }
 
@@ -1539,9 +2333,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .set({ mediaUrl: simulatedMediaUrl })
           .where(eq(messages.id, messageId));
 
+        const fetchedAt = Date.now();
         return res.status(200).json({
           mediaUrl: simulatedMediaUrl,
-          simulated: true
+          simulated: true,
+          fetchedAt
         });
       }
 
@@ -1559,9 +2355,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .set({ mediaUrl: simulatedMediaUrl })
           .where(eq(messages.id, messageId));
 
+        const fetchedAt = Date.now();
         return res.status(200).json({
           mediaUrl: simulatedMediaUrl,
-          simulated: true
+          simulated: true,
+          fetchedAt
         });
       }
 
@@ -1578,9 +2376,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .set({ mediaUrl: simulatedMediaUrl })
           .where(eq(messages.id, messageId));
 
+        const fetchedAt = Date.now();
         return res.status(200).json({
           mediaUrl: simulatedMediaUrl,
-          simulated: true
+          simulated: true,
+          fetchedAt
         });
       }
 
@@ -1606,7 +2406,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         metadata.message ||
         (metadata.messageData && metadata.messageData.message);
 
-      const mediaUrl = await downloadAndSaveMedia(messageObj, sock);
+      const mediaUrl = await downloadAndSaveMedia(messageObj, sock, conversation.channelId);
 
       if (!mediaUrl) {
 
@@ -1622,7 +2422,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         .set({ mediaUrl })
         .where(eq(messages.id, messageId));
 
-      return res.status(200).json({ mediaUrl });
+      const fetchedAt = Date.now();
+      res.setHeader('X-Media-Fetched-At', fetchedAt.toString());
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      
+      return res.status(200).json({ 
+        mediaUrl,
+        fetchedAt,
+        cacheHint: 'external'
+      });
     } catch (error) {
       console.error('Error downloading media:', error);
       return res.status(500).json({ error: 'Internal server error' });
@@ -1698,7 +2506,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: 'WhatsApp connection not active' });
       }
 
-      const mediaUrl = await downloadAndSaveMedia(waMessage, sock);
+      const mediaUrl = await downloadAndSaveMedia(waMessage, sock, conversation.channelId);
 
       if (!mediaUrl) {
         return res.status(404).json({ error: 'Failed to download media' });
@@ -1911,6 +2719,650 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+
+  app.post('/api/tiktok/refresh-connection/:connectionId', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const connectionId = parseInt(req.params.connectionId);
+      const user = req.user as any;
+
+      if (!user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const connection = await storage.getChannelConnection(connectionId);
+      if (!connection) {
+        return res.status(404).json({ error: 'Connection not found' });
+      }
+
+      if (connection.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      if (connection.channelType !== 'tiktok') {
+        return res.status(400).json({ error: 'Not a TikTok connection' });
+      }
+
+
+      await TikTokService.ensureValidToken(connectionId);
+
+
+      const updatedConnection = await storage.getChannelConnection(connectionId);
+
+      res.json({
+        success: true,
+        message: 'Connection refreshed successfully',
+        connection: updatedConnection
+      });
+    } catch (error) {
+      console.error('Error refreshing TikTok connection:', error);
+      res.status(500).json({ error: 'Failed to refresh connection' });
+    }
+  });
+
+
+  app.post('/api/tiktok/typing/:conversationId', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      const { isTyping } = req.body;
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      if (conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      if (isTyping) {
+        TikTokService.startTypingIndicator(conversationId, user.id, user.companyId);
+      } else {
+        TikTokService.stopTypingIndicator(conversationId, user.id, user.companyId);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error updating typing indicator:', error);
+      res.status(500).json({ error: 'Failed to update typing indicator' });
+    }
+  });
+
+
+  app.post('/api/tiktok/presence/:conversationId', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      const { status } = req.body;
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      if (!['online', 'offline', 'away'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      if (conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      TikTokService.updatePresenceStatus(user.id, conversationId, status, user.companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error updating presence:', error);
+      res.status(500).json({ error: 'Failed to update presence' });
+    }
+  });
+
+
+  app.get('/api/tiktok/typing/:conversationId', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      const user = req.user as any;
+
+      if (!user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      if (conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const typingUsers = TikTokService.getTypingUsers(conversationId);
+
+      res.json({ typingUsers });
+    } catch (error) {
+      console.error('Error getting typing users:', error);
+      res.status(500).json({ error: 'Failed to get typing users' });
+    }
+  });
+
+
+  app.post('/api/tiktok/messages/:messageId/read', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      await TikTokService.markMessageAsRead(messageId, user.id, user.companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error marking message as read:', error);
+      res.status(500).json({ error: 'Failed to mark message as read' });
+    }
+  });
+
+
+  app.post('/api/tiktok/conversations/:conversationId/read', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+      if (conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      await TikTokService.markConversationAsRead(conversationId, user.id, user.companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error marking conversation as read:', error);
+      res.status(500).json({ error: 'Failed to mark conversation as read' });
+    }
+  });
+
+
+  app.get('/api/tiktok/messages/:messageId/status', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const user = req.user as any;
+
+      if (!user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      const status = await TikTokService.getMessageDeliveryStatus(messageId);
+
+      res.json({ status });
+    } catch (error) {
+      console.error('Error getting message status:', error);
+      res.status(500).json({ error: 'Failed to get message status' });
+    }
+  });
+
+
+  app.get('/api/tiktok/messages/:messageId/receipts', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const user = req.user as any;
+
+      if (!user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      const receipts = TikTokService.getMessageReadReceipts(messageId);
+
+      res.json({ receipts });
+    } catch (error) {
+      console.error('Error getting read receipts:', error);
+      res.status(500).json({ error: 'Failed to get read receipts' });
+    }
+  });
+
+
+  app.post('/api/tiktok/messages/:messageId/reactions', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const { emoji } = req.body;
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      if (!emoji) {
+        return res.status(400).json({ error: 'Emoji is required' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      await TikTokService.addReaction(messageId, user.id, emoji, user.companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error adding reaction:', error);
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to add reaction' });
+    }
+  });
+
+
+  app.delete('/api/tiktok/messages/:messageId/reactions/:emoji', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const emoji = decodeURIComponent(req.params.emoji);
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      await TikTokService.removeReaction(messageId, user.id, emoji, user.companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error removing reaction:', error);
+      res.status(500).json({ error: 'Failed to remove reaction' });
+    }
+  });
+
+
+  app.get('/api/tiktok/messages/:messageId/reactions', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const user = req.user as any;
+
+      if (!user?.companyId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+
+      const message = await storage.getMessageById(messageId);
+      if (!message) {
+        return res.status(404).json({ error: 'Message not found' });
+      }
+
+      const conversation = await storage.getConversation(message.conversationId);
+      if (!conversation || conversation.companyId !== user.companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+
+      const summary = TikTokService.getReactionSummary(messageId);
+
+      res.json({ reactions: summary });
+    } catch (error) {
+      console.error('Error getting reactions:', error);
+      res.status(500).json({ error: 'Failed to get reactions' });
+    }
+  });
+
+
+  app.get('/api/tiktok/reactions/available', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      res.json({ emojis: TikTokService.AVAILABLE_REACTIONS });
+    } catch (error) {
+      console.error('Error getting available reactions:', error);
+      res.status(500).json({ error: 'Failed to get available reactions' });
+    }
+  });
+
+
+  app.get('/api/tiktok/mentions/unread', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = req.user as any;
+
+      if (!user?.id) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      const mentions = TikTokService.getUnreadMentions(user.id);
+
+      res.json({ mentions });
+    } catch (error) {
+      console.error('Error getting unread mentions:', error);
+      res.status(500).json({ error: 'Failed to get unread mentions' });
+    }
+  });
+
+
+  app.post('/api/tiktok/mentions/:messageId/read', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const messageId = parseInt(req.params.messageId);
+      const user = req.user as any;
+
+      if (!user?.id) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      TikTokService.markMentionAsRead(user.id, messageId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error marking mention as read:', error);
+      res.status(500).json({ error: 'Failed to mark mention as read' });
+    }
+  });
+
+
+  app.delete('/api/tiktok/mentions', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const user = req.user as any;
+
+      if (!user?.id) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
+
+      TikTokService.clearUserMentions(user.id);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error clearing mentions:', error);
+      res.status(500).json({ error: 'Failed to clear mentions' });
+    }
+  });
+
+
+  app.post('/api/tiktok/oauth/prepare', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const { state, accountName } = req.body;
+
+      if (!state || !accountName) {
+        return res.status(400).json({ error: 'State and account name are required' });
+      }
+
+
+      if (!req.session) {
+        req.session = {} as any;
+      }
+      (req.session as any).tiktokOAuthState = state;
+      (req.session as any).tiktokAccountName = accountName;
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error preparing TikTok OAuth:', error);
+      res.status(500).json({ error: 'Failed to prepare OAuth' });
+    }
+  });
+
+
+  app.get('/api/tiktok/oauth/callback', ensureAuthenticated, ensureActiveSubscription, async (req: Request, res: Response) => {
+    try {
+      const { code, state, error, error_description } = req.query;
+      const user = req.user as any;
+
+      if (!user?.id || !user?.companyId) {
+        return res.status(401).send(`
+          <html>
+            <body>
+              <h1>Authentication Error</h1>
+              <p>User not authenticated. Please log in and try again.</p>
+              <script>window.close();</script>
+            </body>
+          </html>
+        `);
+      }
+
+
+      if (error) {
+        console.error('TikTok OAuth error:', error, error_description);
+        return res.status(400).send(`
+          <html>
+            <body>
+              <h1>TikTok Authorization Failed</h1>
+              <p>${error_description || error}</p>
+              <script>
+                setTimeout(() => {
+                  window.opener?.postMessage({ type: 'tiktok_oauth_error', error: '${error}' }, '*');
+                  window.close();
+                }, 2000);
+              </script>
+            </body>
+          </html>
+        `);
+      }
+
+
+      const savedState = (req.session as any)?.tiktokOAuthState;
+      if (!state || state !== savedState) {
+        console.error('TikTok OAuth state mismatch');
+        return res.status(400).send(`
+          <html>
+            <body>
+              <h1>Security Error</h1>
+              <p>Invalid state parameter. Please try again.</p>
+              <script>window.close();</script>
+            </body>
+          </html>
+        `);
+      }
+
+      if (!code) {
+        return res.status(400).send(`
+          <html>
+            <body>
+              <h1>Authorization Error</h1>
+              <p>No authorization code received from TikTok.</p>
+              <script>window.close();</script>
+            </body>
+          </html>
+        `);
+      }
+
+
+      const platformConfig = await TikTokService.getPlatformConfig();
+
+
+      const tokenResponse = await TikTokService.exchangeCodeForToken(
+        code as string,
+        platformConfig.redirectUrl || `${process.env.BASE_URL || 'http://localhost:5000'}/api/tiktok/oauth/callback`
+      );
+
+
+      const userInfo = await TikTokService.getUserInfo(tokenResponse.access_token);
+
+
+      const accountName = (req.session as any)?.tiktokAccountName || `TikTok - ${userInfo.display_name}`;
+
+
+      const connectionData = {
+        openId: userInfo.open_id,
+        unionId: userInfo.union_id,
+        displayName: userInfo.display_name,
+        username: userInfo.username,
+        avatarUrl: userInfo.avatar_url,
+        isVerified: userInfo.is_verified,
+        accessToken: tokenResponse.access_token,
+        refreshToken: tokenResponse.refresh_token,
+        tokenExpiresAt: Date.now() + (tokenResponse.expires_in * 1000),
+        scopes: tokenResponse.scope?.split(',') || [],
+        lastSyncAt: Date.now(),
+        status: 'active'
+      };
+
+      const connection = await storage.createChannelConnection({
+        companyId: user.companyId,
+        userId: user.id,
+        channelType: 'tiktok',
+        accountId: userInfo.open_id,
+        accountName: accountName,
+        accessToken: tokenResponse.access_token,
+        status: 'active',
+        connectionData: connectionData
+      });
+
+
+      await TikTokService.initializeConnection(connection.id);
+
+
+      if (req.session) {
+        delete (req.session as any).tiktokOAuthState;
+        delete (req.session as any).tiktokAccountName;
+      }
+
+
+      res.send(`
+        <html>
+          <head>
+            <style>
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                margin: 0;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              }
+              .container {
+                background: white;
+                padding: 2rem;
+                border-radius: 1rem;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                text-align: center;
+                max-width: 400px;
+              }
+              .success-icon {
+                font-size: 4rem;
+                margin-bottom: 1rem;
+              }
+              h1 {
+                color: #333;
+                margin-bottom: 0.5rem;
+              }
+              p {
+                color: #666;
+                margin-bottom: 1.5rem;
+              }
+              .account-info {
+                background: #f7fafc;
+                padding: 1rem;
+                border-radius: 0.5rem;
+                margin-bottom: 1rem;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="success-icon">✅</div>
+              <h1>TikTok Connected!</h1>
+              <p>Your TikTok account has been successfully connected.</p>
+              <div class="account-info">
+                <strong>${userInfo.display_name}</strong>
+                ${userInfo.username ? `<br/>@${userInfo.username}` : ''}
+              </div>
+              <p style="font-size: 0.875rem; color: #999;">This window will close automatically...</p>
+            </div>
+            <script>
+              window.opener?.postMessage({ type: 'tiktok_oauth_success' }, '*');
+              setTimeout(() => window.close(), 3000);
+            </script>
+          </body>
+        </html>
+      `);
+    } catch (error: any) {
+      console.error('Error processing TikTok OAuth callback:', error);
+      res.status(500).send(`
+        <html>
+          <body>
+            <h1>Connection Error</h1>
+            <p>${error.message || 'Failed to connect TikTok account'}</p>
+            <script>
+              setTimeout(() => {
+                window.opener?.postMessage({ type: 'tiktok_oauth_error', error: '${error.message}' }, '*');
+                window.close();
+              }, 2000);
+            </script>
+          </body>
+        </html>
+      `);
+    }
+  });
+
   app.post('/api/channel-connections/whatsapp-embedded-signup', ensureAuthenticated, ensureActiveSubscription, async (req: Request, res: Response) => {
     try {
       const { code } = req.body;
@@ -2078,6 +3530,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({
         message: 'Failed to process Meta WhatsApp embedded signup',
         error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  });
+
+
+  app.get('/api/partner-configurations/meta/availability', ensureAuthenticated, async (req: Request, res: Response) => {
+    try {
+      const config = await storage.getPartnerConfiguration('meta');
+      
+      if (!config || !config.isActive) {
+        return res.json({ 
+          isAvailable: false, 
+          message: 'Meta WhatsApp Business API Partner integration is not configured' 
+        });
+      }
+
+      res.json({ 
+        isAvailable: true, 
+        message: 'Meta WhatsApp Business API Partner integration is available',
+        config: {
+          partnerApiKey: config.partnerApiKey,
+          configId: config.configId
+        }
+      });
+    } catch (error) {
+      console.error('Error checking Meta partner availability:', error);
+      res.status(500).json({ 
+        isAvailable: false, 
+        message: 'Failed to check Meta partner configuration' 
       });
     }
   });
@@ -2326,13 +3807,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
           data: conversations
         }));
 
+
+        const qrCache = new Map<number, { qrCode: string; timestamp: number }>();
+        const QR_CACHE_TTL = 12000; // 12 seconds TTL
+
         const unsubscribeQrCode = whatsAppService.subscribeToEvents('qrCode', (data) => {
           if (data && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: 'whatsappQrCode',
-              connectionId: data.connectionId,
-              qrCode: data.qrCode
-            }));
+
+            const cached = qrCache.get(data.connectionId);
+            const now = Date.now();
+            const shouldSend = !cached || 
+                             cached.qrCode !== data.qrCode || 
+                             (now - cached.timestamp) > QR_CACHE_TTL;
+            
+            if (shouldSend) {
+              const message = {
+                type: 'whatsappQrCode',
+                connectionId: data.connectionId,
+                qrCode: data.qrCode
+              };
+              
+              ws.send(JSON.stringify(message));
+              qrCache.set(data.connectionId, { qrCode: data.qrCode, timestamp: now });
+            }
           }
         });
 
@@ -2573,18 +4070,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
             let messageContent = content;
             if (!isFromBot) {
               try {
-                const user = await storage.getUser(userId);
-                if (user) {
-                  const nameCandidates = [
-                    (user as any).fullName,
-                    (user as any).name,
-                    [ (user as any).firstName, (user as any).lastName ].filter(Boolean).join(' ').trim(),
-                    (user as any).displayName,
-                    typeof (user as any).email === 'string' ? (user as any).email.split('@')[0] : undefined
-                  ].filter((v: any) => typeof v === 'string' && v.trim().length > 0);
-                  const signatureName = nameCandidates[0];
-                  if (signatureName) {
-                    messageContent = `> *${signatureName}*\n\n${content}`;
+
+                let agentSignatureEnabled = true; // Default to enabled
+
+                if (conversation.companyId) {
+                  const agentSignatureSetting = await storage.getCompanySetting(
+                    conversation.companyId,
+                    'inbox_agent_signature_enabled'
+                  );
+                  agentSignatureEnabled = agentSignatureSetting?.value !== undefined && agentSignatureSetting?.value !== null
+                    ? Boolean(agentSignatureSetting.value)
+                    : true;
+                }
+
+                if (agentSignatureEnabled) {
+                  const user = await storage.getUser(userId);
+                  if (user) {
+                    const nameCandidates = [
+                      (user as any).fullName,
+                      (user as any).name,
+                      [ (user as any).firstName, (user as any).lastName ].filter(Boolean).join(' ').trim(),
+                      (user as any).displayName,
+                      typeof (user as any).email === 'string' ? (user as any).email.split('@')[0] : undefined
+                    ].filter((v: any) => typeof v === 'string' && v.trim().length > 0);
+                    const signatureName = nameCandidates[0];
+                    if (signatureName) {
+                      messageContent = `> *${signatureName}*\n\n${content}`;
+                    }
                   }
                 }
               } catch (userError) {
@@ -3070,26 +4582,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const userPermissions = await getUserPermissions(user);
 
 
+      const normalizeStatuses = (conns: any[]) => conns.map(c => ({
+        ...c,
+        status: c.status === 'connected' ? 'active' : (c.status === 'disconnected' ? 'inactive' : c.status)
+      }));
+
       if (user.isSuperAdmin) {
         const connections = await storage.getChannelConnections(null, undefined);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       if (userPermissions[PERMISSIONS.MANAGE_CHANNELS]) {
         const connections = await storage.getChannelConnections(null, user.companyId);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       if (userPermissions[PERMISSIONS.VIEW_CHANNELS]) {
         const connections = await storage.getChannelConnections(null, user.companyId);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       const connections = await storage.getChannelConnections(user.id, user.companyId);
-      res.json(connections);
+      res.json(normalizeStatuses(connections));
     } catch (error) {
       console.error('Error fetching channel connections:', error);
       res.status(500).json({ error: 'Failed to fetch channel connections' });
@@ -3108,26 +4625,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const userPermissions = await getUserPermissions(user);
 
 
+      const normalizeStatuses = (conns: any[]) => conns.map(c => ({
+        ...c,
+        status: c.status === 'connected' ? 'active' : (c.status === 'disconnected' ? 'inactive' : c.status)
+      }));
+
       if (user.isSuperAdmin) {
         const connections = await storage.getChannelConnections(null, undefined);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       if (userPermissions[PERMISSIONS.MANAGE_CHANNELS]) {
         const connections = await storage.getChannelConnections(null, user.companyId);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       if (userPermissions[PERMISSIONS.VIEW_CHANNELS]) {
         const connections = await storage.getChannelConnections(null, user.companyId);
-        return res.json(connections);
+        return res.json(normalizeStatuses(connections));
       }
 
 
       const connections = await storage.getChannelConnections(user.id, user.companyId);
-      res.json(connections);
+      res.json(normalizeStatuses(connections));
     } catch (error) {
       console.error('Error fetching channels:', error);
       res.status(500).json({ error: 'Failed to fetch channels' });
@@ -3196,6 +4718,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         updateData.accountName = req.body.accountName;
       }
 
+      if (req.body.accountId) {
+        updateData.accountId = req.body.accountId;
+      }
+
       if (req.body.accessToken) {
         updateData.accessToken = req.body.accessToken;
       }
@@ -3208,6 +4734,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
         };
       }
 
+
+      if ('proxyEnabled' in req.body) {
+        updateData.proxyEnabled = req.body.proxyEnabled;
+      }
+      if ('proxyType' in req.body) {
+        updateData.proxyType = req.body.proxyType ?? null;
+      }
+      if ('proxyHost' in req.body) {
+        updateData.proxyHost = req.body.proxyHost ?? null;
+      }
+      if ('proxyPort' in req.body) {
+        const p = req.body.proxyPort;
+        updateData.proxyPort = (p === null || p === undefined || p === '') ? null : parseInt(p, 10);
+      }
+      if ('proxyUsername' in req.body) {
+        updateData.proxyUsername = req.body.proxyUsername ?? null;
+      }
+      if ('proxyPassword' in req.body) {
+
+        const pw = req.body.proxyPassword;
+        if (pw === null || (typeof pw === 'string' && pw.length > 0)) {
+          updateData.proxyPassword = pw;
+        }
+      }
 
       const updatedConnection = await storage.updateChannelConnection(connectionId, updateData);
 
@@ -3245,6 +4795,84 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
 
+  app.post('/api/channel-connections/:id/test-proxy', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const connectionId = parseInt(req.params.id);
+      if (isNaN(connectionId)) {
+        return res.status(400).json({ success: false, error: 'Invalid connection ID', status: 'failed' });
+      }
+
+      const connection = await storage.getChannelConnection(connectionId);
+      if (!connection) {
+        return res.status(404).json({ success: false, error: 'Connection not found', status: 'failed' });
+      }
+
+      const user = req.user as any;
+      if (!user) {
+        return res.status(401).json({ success: false, error: 'Unauthorized', status: 'failed' });
+      }
+
+
+      if (!user.isSuperAdmin) {
+        const sameCompany = connection.companyId !== null && connection.companyId === user.companyId;
+        const isOwner = connection.userId === user.id;
+        if (!sameCompany && !isOwner) {
+          return res.status(403).json({ success: false, error: 'Access denied', status: 'failed' });
+        }
+      }
+
+      const { proxyType, proxyHost, proxyPort, proxyUsername, proxyPassword } = req.body || {};
+
+      const allowedTypes = ['http', 'https', 'socks5'];
+      const portNum = Number(proxyPort);
+      if (!proxyType || !allowedTypes.includes(proxyType)) {
+        return res.status(400).json({ success: false, error: 'Invalid proxyType. Must be one of http, https, socks5', status: 'failed' });
+      }
+      if (!proxyHost || typeof proxyHost !== 'string' || proxyHost.trim().length === 0) {
+        return res.status(400).json({ success: false, error: 'proxyHost is required', status: 'failed' });
+      }
+      if (!Number.isInteger(portNum) || portNum <= 0) {
+        return res.status(400).json({ success: false, error: 'proxyPort must be a positive integer', status: 'failed' });
+      }
+
+      const userEnc = encodeURIComponent(proxyUsername || '');
+      const passEnc = encodeURIComponent(proxyPassword || '');
+      let proxyUrl: string;
+      if (proxyUsername && proxyPassword) {
+        proxyUrl = `${proxyType}://${userEnc}:${passEnc}@${proxyHost}:${portNum}`;
+      } else {
+        proxyUrl = `${proxyType}://${proxyHost}:${portNum}`;
+      }
+
+      const agent = proxyType === 'socks5' ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
+
+      try {
+        const response = await axios.get('https://web.whatsapp.com', {
+          httpAgent: agent as any,
+          httpsAgent: agent as any,
+          timeout: 10000,
+          maxRedirects: 5,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+
+        if (response && response.status < 400) {
+          await storage.updateChannelConnection(connectionId, { proxyTestStatus: 'working', proxyLastTested: new Date() } as any);
+          return res.json({ success: true, message: 'Proxy connection successful', status: 'working' });
+        }
+
+        await storage.updateChannelConnection(connectionId, { proxyTestStatus: 'failed', proxyLastTested: new Date() } as any);
+        return res.status(400).json({ success: false, error: 'Non-success status from target site', status: 'failed' });
+      } catch (err: any) {
+        await storage.updateChannelConnection(connectionId, { proxyTestStatus: 'failed', proxyLastTested: new Date() } as any);
+        return res.status(400).json({ success: false, error: err?.message || 'Proxy test failed', status: 'failed' });
+      }
+    } catch (error: any) {
+      console.error('Error testing proxy:', error);
+      return res.status(500).json({ success: false, error: error?.message || 'Internal server error' });
+    }
+  });
+
+
   app.get('/api/channel-connections/:id', ensureAuthenticated, async (req: any, res) => {
     try {
       const connectionId = parseInt(req.params.id);
@@ -3259,6 +4887,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
 
+
       const sanitizedConnection = {
         ...connection,
         accessToken: undefined,
@@ -3266,6 +4895,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           ...(connection.connectionData || {}),
           accessToken: undefined,
           appSecret: undefined
+
         }
       };
 
@@ -3390,6 +5020,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error('Error initiating Messenger connection:', err);
           res.status(201).json(connection);
         }
+      } else if (connection.channelType === 'webchat') {
+        try {
+
+          const token = await webchatService.generateWidgetToken(connection.id);
+          const updated = await storage.getChannelConnection(connection.id);
+          const embedScript = `<script src="${req.protocol}://${req.get('host')}/api/webchat/widget.js?token=${encodeURIComponent(token)}" async></script>`;
+          res.status(201).json({ ...updated, embedScript });
+        } catch (err: any) {
+          console.error('Error initializing WebChat connection:', err);
+          res.status(201).json(connection);
+        }
       } else {
         res.status(201).json(connection);
       }
@@ -3438,6 +5079,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await instagramService.disconnect(connectionId, req.user.id);
       } else if (connection.channelType === 'messenger') {
         await messengerService.disconnect(connectionId, req.user.id);
+      } else if (connection.channelType === 'tiktok') {
+        await TikTokService.disconnectConnection(connectionId);
+      } else if (connection.channelType === 'webchat') {
+        await webchatService.disconnect(connectionId, req.user.id);
       }
 
       const deleted = await storage.deleteChannelConnection(connectionId);
@@ -3493,6 +5138,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (err: any) {
       console.error('Error reconnecting to WhatsApp:', err);
       res.status(500).json({ message: err.message });
+    }
+  });
+
+
+  app.post('/api/channel-connections/:id/regenerate-token', ensureAuthenticated, async (req: any, res: Response) => {
+    try {
+      const connectionId = parseInt(req.params.id);
+      const connection = await storage.getChannelConnection(connectionId);
+      if (!connection) return res.status(404).json({ error: 'Connection not found' });
+      if (connection.channelType !== 'webchat') return res.status(400).json({ error: 'Not a WebChat connection' });
+      if (connection.userId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+      const token = await webchatService.generateWidgetToken(connectionId);
+      const updated = await storage.getChannelConnection(connectionId);
+      const embedScript = `<script src="${req.protocol}://${req.get('host')}/api/webchat/widget.js?token=${encodeURIComponent(token)}" async></script>`;
+      res.json({ ...updated, embedScript });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || 'Failed to regenerate token' });
     }
   });
 
@@ -4408,14 +6070,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const channel = req.query.channel as string || undefined;
       const tags = req.query.tags ? (req.query.tags as string).split(',').map(tag => tag.trim()).filter(Boolean) : undefined;
       const includeArchived = req.query.includeArchived === 'true';
+      const archivedOnly = req.query.archivedOnly === 'true';
+      const dateRange = req.query.dateRange as string || undefined;
 
       const companyId = user.isSuperAdmin ? undefined : user.companyId;
 
-      const result = await storage.getContacts({ page, limit, search, channel, tags, companyId, includeArchived });
+      
+
+      const result = await storage.getContacts({
+        page,
+        limit,
+        search,
+        channel,
+        tags,
+        companyId,
+        includeArchived,
+        archivedOnly,
+        dateRange
+      });
+
+     
 
       res.json(result);
     } catch (error) {
-      console.error('Error fetching contacts:', error);
+      console.error('[Contacts API] Error fetching contacts:', error);
       res.status(500).json({ message: 'Failed to fetch contacts' });
     }
   });
@@ -4491,7 +6169,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(403).json({ error: 'Access denied to this connection' });
       }
 
-      if (connection.channelType !== 'whatsapp_unofficial') {
+      if (connection.channelType !== 'whatsapp_unofficial' && connection.channelType !== 'whatsapp') {
         return res.status(400).json({
           error: 'This feature only works with unofficial WhatsApp connections'
         });
@@ -4560,10 +6238,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: 'User must be associated with a company' });
       }
 
-      const { tags, createdAfter, createdBefore, search, channel } = req.body;
+      const { exportScope, tags, createdAfter, createdBefore, search, channel } = req.body;
 
       const exportOptions = {
         companyId: user.companyId,
+        exportScope: exportScope || 'all',
         tags: tags && Array.isArray(tags) ? tags : undefined,
         createdAfter: createdAfter || undefined,
         createdBefore: createdBefore || undefined,
@@ -4571,7 +6250,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
         channel: channel || undefined
       };
 
+
       const contacts = await storage.getContactsForExport(exportOptions);
+
+
+      const escapeCsvField = (value: any): string => {
+        if (value === null || value === undefined) {
+          return '""';
+        }
+
+        let str = String(value).replace(/\n/g, ' ').replace(/\r/g, '');
+
+        str = str.replace(/"/g, '""');
+
+        return `"${str}"`;
+      };
+
+
+      const formatDate = (date: Date | string | null | undefined): string => {
+        if (!date) return '';
+        try {
+          const d = typeof date === 'string' ? new Date(date) : date;
+          return d.toISOString();
+        } catch {
+          return '';
+        }
+      };
 
       const headers = [
         'ID',
@@ -4592,18 +6296,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       contacts.forEach(contact => {
         const row = [
-          contact.id?.toString() || '',
-          `"${(contact.name || '').replace(/"/g, '""')}"`,
-          `"${(contact.email || '').replace(/"/g, '""')}"`,
-          `"${(contact.phone || '').replace(/"/g, '""')}"`,
-          `"${(contact.company || '').replace(/"/g, '""')}"`,
-          `"${(contact.tags || []).join(', ').replace(/"/g, '""')}"`,
-          `"${(contact.identifierType || '').replace(/"/g, '""')}"`,
-          `"${(contact.identifier || '').replace(/"/g, '""')}"`,
-          `"${(contact.source || '').replace(/"/g, '""')}"`,
-          `"${(contact.notes || '').replace(/"/g, '""')}"`,
-          `"${contact.createdAt || ''}"`,
-          `"${contact.updatedAt || ''}"`
+          escapeCsvField(contact.id),
+          escapeCsvField(contact.name),
+          escapeCsvField(contact.email),
+          escapeCsvField(contact.phone),
+          escapeCsvField(contact.company),
+          escapeCsvField((contact.tags || []).join(', ')),
+          escapeCsvField(contact.identifierType),
+          escapeCsvField(contact.identifier),
+          escapeCsvField(contact.source),
+          escapeCsvField(contact.notes),
+          escapeCsvField(formatDate(contact.createdAt)),
+          escapeCsvField(formatDate(contact.updatedAt))
         ];
         csvRows.push(row.join(','));
       });
@@ -4614,6 +6318,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('X-Exported-Count', contacts.length.toString());
       res.send(csvContent);
 
     } catch (error) {
@@ -4625,23 +6330,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/contacts/without-conversations', ensureAuthenticated, async (req, res) => {
     try {
       const user = req.user as any;
-
-      if (!user.companyId) {
-        return res.status(400).json({ message: 'User must be associated with a company' });
-      }
-
       const { search, limit, offset } = req.query;
 
+      if (!user || !user.companyId) {
+        return res.status(400).json({
+          message: 'User must be associated with a company'
+        });
+      }
+
+
+      let parsedLimit: number | undefined;
+      let parsedOffset: number | undefined;
+
+      if (limit) {
+        parsedLimit = parseInt(limit as string);
+        if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+          return res.status(400).json({
+            message: 'Invalid limit parameter. Must be between 1 and 100.'
+          });
+        }
+      }
+
+      if (offset) {
+        parsedOffset = parseInt(offset as string);
+        if (isNaN(parsedOffset) || parsedOffset < 0) {
+          return res.status(400).json({
+            message: 'Invalid offset parameter. Must be non-negative.'
+          });
+        }
+      }
+
+      const searchTerm = search as string;
+      if (searchTerm && searchTerm.length > 100) {
+        return res.status(400).json({
+          message: 'Search term too long. Maximum 100 characters.'
+        });
+      }
+
       const result = await storage.getContactsWithoutConversations(user.companyId, {
-        search: search as string,
-        limit: limit ? parseInt(limit as string) : undefined,
-        offset: offset ? parseInt(offset as string) : undefined
+        search: searchTerm,
+        limit: parsedLimit,
+        offset: parsedOffset
       });
 
       res.json(result);
-    } catch (error) {
-      console.error('Error getting contacts without conversations:', error);
-      res.status(500).json({ message: 'Failed to get contacts without conversations' });
+
+    } catch (error: any) {
+      res.status(500).json({
+        message: 'Failed to get contacts without conversations',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
     }
   });
 
@@ -4697,6 +6435,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const updateData = req.body;
+
+
+      if (updateData.identifierType && !updateData.source) {
+        if (updateData.identifierType === 'whatsapp_official') {
+          updateData.source = 'whatsapp_official';
+        } else if (updateData.identifierType === 'whatsapp_unofficial' || updateData.identifierType === 'whatsapp') {
+          updateData.source = 'whatsapp';
+        } else if (updateData.identifierType === 'messenger') {
+          updateData.source = 'messenger';
+        } else if (updateData.identifierType === 'instagram') {
+          updateData.source = 'instagram';
+        }
+      }
+
       const updatedContact = await storage.updateContact(id, updateData);
 
 
@@ -5168,11 +6920,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 case 'tags':
                   contactData.tags = value.split(',').map(t => t.trim()).filter(Boolean);
                   break;
+                case 'identifierType':
+                case 'identifier_type':
+                  contactData.identifierType = value;
+                  break;
+                case 'identifier':
+                  contactData.identifier = value;
+                  break;
+                case 'source':
+                  contactData.source = value;
+                  break;
               }
             }
           });
 
-          contactData.source = 'csv_import';
+
+          if (!contactData.source) {
+            if (contactData.identifierType === 'whatsapp_official') {
+              contactData.source = 'whatsapp_official';
+            } else if (contactData.identifierType === 'whatsapp_unofficial' || contactData.identifierType === 'whatsapp') {
+              contactData.source = 'whatsapp';
+            } else if (contactData.identifierType === 'messenger') {
+              contactData.source = 'messenger';
+            } else if (contactData.identifierType === 'instagram') {
+              contactData.source = 'instagram';
+            } else {
+              contactData.source = 'csv_import';
+            }
+          }
           contactData.isActive = true;
 
           if (!contactData.name || contactData.name.trim() === '') {
@@ -5266,8 +7041,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+      
       const requiredHeaders = ['name'];
-      const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
+
+      const headersLowercase = headers.map(h => h.toLowerCase());
+      const missingHeaders = requiredHeaders.filter(h => !headersLowercase.includes(h));
 
       if (missingHeaders.length > 0) {
         return res.status(400).json({
@@ -5301,9 +7079,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 break;
               case 'identifiertype':
               case 'identifier_type':
+              case 'channel type':
                 contactData.identifierType = value || null;
                 break;
               case 'identifier':
+              case 'channel identifier':
                 contactData.identifier = value || null;
                 break;
               case 'notes':
@@ -5318,7 +7098,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
           });
 
-          contactData.source = contactData.source || 'csv_import';
+
+          if (!contactData.source || contactData.source === 'csv_import') {
+            if (contactData.identifierType === 'whatsapp_official') {
+              contactData.source = 'whatsapp_official';
+            } else if (contactData.identifierType === 'whatsapp_unofficial' || contactData.identifierType === 'whatsapp') {
+              contactData.source = 'whatsapp';
+            } else if (contactData.identifierType === 'messenger') {
+              contactData.source = 'messenger';
+            } else if (contactData.identifierType === 'instagram') {
+              contactData.source = 'instagram';
+            } else {
+              contactData.source = 'csv_import';
+            }
+          }
           contactData.isActive = true;
 
           if (!contactData.name || contactData.name.trim() === '') {
@@ -5871,7 +7664,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const contactId = parseInt(req.params.contactId);
       const companyId = req.user?.companyId;
       const userId = req.user?.id;
-      const { title, description, priority, status, dueDate, assignedTo, category, tags } = req.body;
+      const { title, description, priority, status, dueDate, assignedTo, category, tags, backgroundColor } = req.body;
 
       if (!companyId || !userId) {
         return res.status(400).json({ error: 'Company ID and User ID required' });
@@ -5902,6 +7695,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         assignedTo: assignedTo?.trim() || null,
         category: category?.trim() || null,
         tags: Array.isArray(tags) ? tags : [],
+        backgroundColor: backgroundColor || '#ffffff',
         createdBy: userId
       };
 
@@ -6084,6 +7878,375 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+
+  app.get('/api/tasks', ensureAuthenticated, requireAnyPermission([PERMISSIONS.VIEW_TASKS, PERMISSIONS.MANAGE_TASKS]), async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+      const { status, priority, assignedTo, contactId, search, page, limit } = req.query;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      const result = await storage.getCompanyTasks(companyId, {
+        status: status as string,
+        priority: priority as string,
+        assignedTo: assignedTo as string,
+        contactId: contactId ? parseInt(contactId as string) : undefined,
+        search: search as string,
+        page: page ? parseInt(page as string) : 1,
+        limit: limit ? parseInt(limit as string) : 50
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error('Error fetching tasks:', error);
+      res.status(500).json({ error: 'Failed to fetch tasks' });
+    }
+  });
+
+  app.get('/api/tasks/:id', ensureAuthenticated, requireAnyPermission([PERMISSIONS.VIEW_TASKS, PERMISSIONS.MANAGE_TASKS]), async (req: any, res) => {
+    try {
+      const taskId = parseInt(req.params.id);
+      const companyId = req.user?.companyId;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (isNaN(taskId)) {
+        return res.status(400).json({ error: 'Invalid task ID' });
+      }
+
+      const task = await storage.getTask(taskId, companyId);
+
+      if (!task) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+
+      res.json(task);
+    } catch (error) {
+      console.error('Error fetching task:', error);
+      res.status(500).json({ error: 'Failed to fetch task' });
+    }
+  });
+
+  app.post('/api/tasks', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+      const userId = req.user?.id;
+      const { contactId, title, description, priority, status, dueDate, assignedTo, category, tags, backgroundColor } = req.body;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (!contactId) {
+        return res.status(400).json({ error: 'Contact ID is required' });
+      }
+
+      if (!title || title.trim() === '') {
+        return res.status(400).json({ error: 'Task title is required' });
+      }
+
+
+      const contact = await storage.getContact(contactId);
+      if (!contact || contact.companyId !== companyId) {
+        return res.status(404).json({ error: 'Contact not found' });
+      }
+
+      const taskData: InsertContactTask = {
+        contactId,
+        companyId,
+        title: title.trim(),
+        description: description?.trim() || null,
+        priority: priority || 'medium',
+        status: status || 'not_started',
+        dueDate: dueDate ? new Date(dueDate) : null,
+        assignedTo: assignedTo || null,
+        category: category?.trim() || null,
+        tags: tags || null,
+        backgroundColor: backgroundColor || '#ffffff',
+        createdBy: userId,
+        updatedBy: userId
+      };
+
+      const task = await storage.createTask(taskData);
+
+      res.status(201).json(task);
+    } catch (error) {
+      console.error('Error creating task:', error);
+      res.status(500).json({ error: 'Failed to create task' });
+    }
+  });
+
+
+  app.patch('/api/tasks/bulk', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+      const userId = req.user?.id;
+      const { taskIds, updates } = req.body;
+
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (!Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'Task IDs array is required' });
+      }
+
+      if (!updates || typeof updates !== 'object') {
+        return res.status(400).json({ error: 'Updates object is required' });
+      }
+
+      const validTaskIds = taskIds.filter(id => !isNaN(parseInt(id))).map(id => parseInt(id));
+
+
+      if (validTaskIds.length === 0) {
+        return res.status(400).json({ error: 'No valid task IDs provided' });
+      }
+
+
+      const taskValidationPromises = validTaskIds.map(async (taskId) => {
+        const existingTask = await storage.getTask(taskId, companyId);
+        if (!existingTask) {
+          throw new Error(`Task ${taskId} not found`);
+        }
+        return existingTask;
+      });
+
+      await Promise.all(taskValidationPromises);
+
+      const updateData = {
+        ...updates,
+        updatedBy: userId
+      };
+
+      const updatedTasks = await storage.bulkUpdateTasks(validTaskIds, companyId, updateData);
+
+      res.json(updatedTasks);
+    } catch (error) {
+      console.error('Error bulk updating tasks:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to bulk update tasks';
+      res.status(400).json({ error: errorMessage });
+    }
+  });
+
+  app.patch('/api/tasks/:id', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const taskId = parseInt(req.params.id);
+      const companyId = req.user?.companyId;
+      const userId = req.user?.id;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (isNaN(taskId)) {
+        return res.status(400).json({ error: 'Invalid task ID' });
+      }
+
+
+      const existingTask = await storage.getTask(taskId, companyId);
+      if (!existingTask) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+
+      const updates: Partial<InsertContactTask> = {
+        ...req.body,
+        updatedBy: userId
+      };
+
+
+      delete (updates as any).id;
+      delete (updates as any).companyId;
+      delete (updates as any).createdAt;
+      delete (updates as any).createdBy;
+
+      const updatedTask = await storage.updateTask(taskId, companyId, updates);
+
+      res.json(updatedTask);
+    } catch (error) {
+      console.error('Error updating task:', error);
+      res.status(500).json({ error: 'Failed to update task' });
+    }
+  });
+
+  app.delete('/api/tasks/:id', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const taskId = parseInt(req.params.id);
+      const companyId = req.user?.companyId;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (isNaN(taskId)) {
+        return res.status(400).json({ error: 'Invalid task ID' });
+      }
+
+
+      const existingTask = await storage.getTask(taskId, companyId);
+      if (!existingTask) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+
+      await storage.deleteTask(taskId, companyId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error deleting task:', error);
+      res.status(500).json({ error: 'Failed to delete task' });
+    }
+  });
+
+  app.patch('/api/tasks/bulk', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+      const userId = req.user?.id;
+      const { taskIds, updates } = req.body;
+
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'User must be associated with a company' });
+      }
+
+      if (!Array.isArray(taskIds) || taskIds.length === 0) {
+        return res.status(400).json({ error: 'Task IDs array is required' });
+      }
+
+      if (!updates || typeof updates !== 'object') {
+        return res.status(400).json({ error: 'Updates object is required' });
+      }
+
+      const validTaskIds = taskIds.filter(id => !isNaN(parseInt(id))).map(id => parseInt(id));
+
+
+      if (validTaskIds.length === 0) {
+        return res.status(400).json({ error: 'No valid task IDs provided' });
+      }
+
+
+      const taskValidationPromises = validTaskIds.map(async (taskId) => {
+        const existingTask = await storage.getTask(taskId, companyId);
+        if (!existingTask) {
+          throw new Error(`Task ${taskId} not found`);
+        }
+        return existingTask;
+      });
+
+      await Promise.all(taskValidationPromises);
+
+      const updateData = {
+        ...updates,
+        updatedBy: userId
+      };
+
+      const updatedTasks = await storage.bulkUpdateTasks(validTaskIds, companyId, updateData);
+
+      res.json(updatedTasks);
+    } catch (error) {
+      console.error('Error bulk updating tasks:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to bulk update tasks';
+      res.status(400).json({ error: errorMessage });
+    }
+  });
+
+
+  app.get('/api/task-categories', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'Company ID required' });
+      }
+
+      const categories = await storage.getTaskCategories(companyId);
+      res.json(categories);
+    } catch (error) {
+      console.error('Error fetching task categories:', error);
+      res.status(500).json({ error: 'Failed to fetch task categories' });
+    }
+  });
+
+  app.post('/api/task-categories', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const companyId = req.user?.companyId;
+      const userId = req.user?.id;
+      const { name, color, icon } = req.body;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'Company ID required' });
+      }
+
+      if (!name || name.trim() === '') {
+        return res.status(400).json({ error: 'Category name is required' });
+      }
+
+      const category = await storage.createTaskCategory({
+        companyId,
+        name: name.trim(),
+        color: color || '#6B7280',
+        icon: icon || 'folder',
+        createdBy: userId
+      });
+
+      res.status(201).json(category);
+    } catch (error) {
+      console.error('Error creating task category:', error);
+      res.status(500).json({ error: 'Failed to create task category' });
+    }
+  });
+
+  app.patch('/api/task-categories/:id', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const categoryId = parseInt(req.params.id);
+      const companyId = req.user?.companyId;
+      const { name, color, icon } = req.body;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'Company ID required' });
+      }
+
+      if (isNaN(categoryId)) {
+        return res.status(400).json({ error: 'Invalid category ID' });
+      }
+
+      const updateData: any = {};
+      if (name !== undefined) updateData.name = name.trim();
+      if (color !== undefined) updateData.color = color;
+      if (icon !== undefined) updateData.icon = icon;
+
+      const category = await storage.updateTaskCategory(categoryId, companyId, updateData);
+      res.json(category);
+    } catch (error) {
+      console.error('Error updating task category:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to update task category';
+      res.status(400).json({ error: errorMessage });
+    }
+  });
+
+  app.delete('/api/task-categories/:id', ensureAuthenticated, requirePermission(PERMISSIONS.MANAGE_TASKS), async (req: any, res) => {
+    try {
+      const categoryId = parseInt(req.params.id);
+      const companyId = req.user?.companyId;
+
+      if (!companyId) {
+        return res.status(400).json({ error: 'Company ID required' });
+      }
+
+      if (isNaN(categoryId)) {
+        return res.status(400).json({ error: 'Invalid category ID' });
+      }
+
+      await storage.deleteTaskCategory(categoryId, companyId);
+      res.status(204).send();
+    } catch (error) {
+      console.error('Error deleting task category:', error);
+      res.status(500).json({ error: 'Failed to delete task category' });
+    }
+  });
 
   app.get('/api/contacts/:contactId/audit-logs', ensureAuthenticated, async (req: any, res) => {
     try {
@@ -6353,9 +8516,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const conversationsWithContacts = await Promise.all(
         conversations.map(async (conversation) => {
           const contact = conversation.contactId ? await storage.getContact(conversation.contactId) : null;
+          const channelConnection = conversation.channelId ? await storage.getChannelConnection(conversation.channelId) : null;
           return {
             ...conversation,
-            contact
+            contact,
+            channelConnection
           };
         })
       );
@@ -6411,10 +8576,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const contact = conversation.contactId ? await storage.getContact(conversation.contactId) : null;
+      const channelConnection = conversation.channelId ? await storage.getChannelConnection(conversation.channelId) : null;
 
       res.json({
         ...conversation,
-        contact
+        contact,
+        channelConnection
       });
     } catch (error) {
       console.error('Error fetching conversation:', error);
@@ -6855,18 +9022,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           
           const participantAny = participant as any;
-          console.log(`Detailed field analysis:`, {
-            'id': participantAny.id,
-            'jid': participantAny.jid,
-            'lid': participantAny.lid,
-            'name': participantAny.name,
-            'notify': participantAny.notify,
-            'verifiedName': participantAny.verifiedName,
-            'pushName': participantAny.pushName,
-            'admin': participantAny.admin,
-            'isAdmin': participantAny.isAdmin,
-            'allKeys': Object.keys(participantAny)
-          });
+ 
 
           const rawId = participant.id.split('@')[0];
 
@@ -7806,6 +9962,348 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post('/api/conversations/:id/send-template', 
+    ensureAuthenticated, 
+    requireAnyPermission([PERMISSIONS.MANAGE_CONVERSATIONS]),
+    async (req: any, res) => {
+      try {
+        const conversationId = parseInt(req.params.id);
+        const { templateId, templateName, languageCode, variables, skipBroadcast } = req.body;
+        const user = req.user;
+
+
+        if (!templateName) {
+          return res.status(400).json({ error: 'Template name is required' });
+        }
+
+
+        const conversation = await storage.getConversation(conversationId);
+        if (!conversation) {
+          return res.status(404).json({ error: 'Conversation not found' });
+        }
+
+
+        if (!user.isSuperAdmin) {
+          if (!user.companyId) {
+            return res.status(400).json({ error: 'User must be associated with a company' });
+          }
+          if (conversation.companyId !== user.companyId) {
+            return res.status(403).json({ error: 'Access denied: Conversation does not belong to your company' });
+          }
+        }
+
+
+        if (conversation.channelType !== 'whatsapp_official') {
+          return res.status(400).json({ error: 'Template messages can only be sent on WhatsApp Official channels' });
+        }
+
+        const channelId = conversation.channelId;
+        if (!channelId) {
+          return res.status(400).json({ error: 'Channel ID is missing' });
+        }
+
+
+        let templateRecord: any = null;
+        if (templateId && conversation.companyId) {
+          const [template] = await db.select()
+            .from(campaignTemplates)
+            .where(and(
+              eq(campaignTemplates.id, templateId),
+              eq(campaignTemplates.companyId, conversation.companyId),
+              eq(campaignTemplates.connectionId, channelId)
+            ))
+            .limit(1);
+
+          if (!template) {
+            return res.status(404).json({ error: 'Template not found or does not belong to this connection' });
+          }
+
+          if (template.whatsappTemplateStatus !== 'approved') {
+            return res.status(400).json({ error: 'Template is not approved. Only approved templates can be sent.' });
+          }
+
+          templateRecord = template;
+
+
+          if (template.whatsappTemplateName && template.whatsappTemplateName !== templateName) {
+
+            console.warn(`Template name mismatch: DB has "${template.whatsappTemplateName}", client sent "${templateName}"`);
+          }
+        }
+
+
+        if (!conversation.contactId || conversation.contactId === null) {
+          return res.status(400).json({ error: 'Contact ID is missing' });
+        }
+        const contact = await storage.getContact(conversation.contactId);
+        if (!contact) {
+          return res.status(404).json({ error: 'Contact not found' });
+        }
+
+
+        const phoneNumber = contact.phone || contact.identifier;
+        if (!phoneNumber) {
+          return res.status(400).json({ error: 'Contact phone number is missing' });
+        }
+
+
+        const components: Array<{
+          type: 'header' | 'body' | 'button';
+          parameters?: Array<{ type: 'text' | 'currency' | 'date_time' | 'image' | 'document' | 'video'; text?: string; image?: any; video?: any; document?: any; [key: string]: any }>;
+        }> = [];
+
+
+
+        if (templateRecord) {
+          let templateMediaUrls = ((templateRecord.mediaUrls as string[]) || []);
+          const mediaHandle = (templateRecord as any).mediaHandle;
+          
+          const hasMediaHandle = !!mediaHandle;
+          const hasMediaUrls = templateMediaUrls.length > 0;
+          const hasAnyMedia = hasMediaHandle || hasMediaUrls;
+          
+          if (hasAnyMedia) {
+
+            let headerFormat = 'IMAGE'; // Default to IMAGE
+            if (hasMediaUrls) {
+              const urlLower = templateMediaUrls[0].toLowerCase();
+              if (urlLower.includes('/video/') || urlLower.match(/\.(mp4|mov|avi|webm|3gpp)$/)) {
+                headerFormat = 'VIDEO';
+              } else if (urlLower.includes('/document/') || urlLower.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/)) {
+                headerFormat = 'DOCUMENT';
+              } else if (urlLower.includes('/image/') || urlLower.match(/\.(jpg|jpeg|png|gif|webp)$/)) {
+                headerFormat = 'IMAGE';
+              }
+            }
+            
+
+            const isMediaHandleUrl = mediaHandle && (mediaHandle.startsWith('http://') || mediaHandle.startsWith('https://'));
+            
+            if (mediaHandle && !isMediaHandleUrl) {
+
+              const headerParam: any = {
+                type: headerFormat.toLowerCase(),
+                [headerFormat.toLowerCase()]: {
+                  id: mediaHandle
+                }
+              };
+              
+              components.push({
+                type: 'header',
+                parameters: [headerParam]
+              });
+            } else if (hasMediaUrls) {
+
+              let mediaUrl = templateMediaUrls[0];
+              
+
+              if (!mediaUrl.startsWith('http://') && !mediaUrl.startsWith('https://')) {
+                const baseUrl = process.env.APP_URL || process.env.BASE_URL || process.env.PUBLIC_URL;
+                if (baseUrl) {
+                  const cleanBaseUrl = baseUrl.replace(/\/$/, '');
+                  const cleanMediaUrl = mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`;
+                  mediaUrl = `${cleanBaseUrl}${cleanMediaUrl}`;
+                } else {
+                  const basePort = process.env.PORT || '9000';
+                  const host = process.env.HOST || 'localhost';
+                  const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+                  if (host === 'localhost' || host === '127.0.0.1') {
+                    mediaUrl = `${protocol}://${host}:${basePort}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
+                  } else {
+                    mediaUrl = `${protocol}://${host}${mediaUrl.startsWith('/') ? mediaUrl : `/${mediaUrl}`}`;
+                  }
+                }
+              }
+              
+              try {
+
+                const connection = await storage.getChannelConnection(channelId);
+                if (!connection) {
+                  throw new Error('Channel connection not found');
+                }
+                
+                const connectionData = connection.connectionData as any;
+                const accessToken = connectionData?.accessToken || connection.accessToken;
+                const phoneNumberId = connectionData?.phoneNumberId;
+                
+                if (!accessToken || !phoneNumberId) {
+                  throw new Error('Missing WhatsApp connection credentials');
+                }
+                
+
+                const mediaResponse = await axios.get(mediaUrl, {
+                  responseType: 'arraybuffer',
+                  timeout: 30000
+                });
+                
+
+                const FormData = (await import('form-data')).default;
+                const formData = new FormData();
+                formData.append('messaging_product', 'whatsapp');
+                
+                const getFileExtension = (url: string): string => {
+                  const urlLower = url.toLowerCase();
+                  if (urlLower.match(/\.(jpg|jpeg)$/)) return 'jpg';
+                  if (urlLower.match(/\.png$/)) return 'png';
+                  if (urlLower.match(/\.gif$/)) return 'gif';
+                  if (urlLower.match(/\.webp$/)) return 'webp';
+                  if (urlLower.match(/\.mp4$/)) return 'mp4';
+                  if (urlLower.match(/\.mov$/)) return 'mov';
+                  if (urlLower.match(/\.pdf$/)) return 'pdf';
+                  return 'jpg';
+                };
+                
+                const getContentType = (ext: string): string => {
+                  const types: Record<string, string> = {
+                    'jpg': 'image/jpeg',
+                    'jpeg': 'image/jpeg',
+                    'png': 'image/png',
+                    'gif': 'image/gif',
+                    'webp': 'image/webp',
+                    'mp4': 'video/mp4',
+                    'mov': 'video/quicktime',
+                    'pdf': 'application/pdf'
+                  };
+                  return types[ext] || 'application/octet-stream';
+                };
+                
+                const fileExtension = getFileExtension(mediaUrl);
+                const contentType = mediaResponse.headers['content-type'] || getContentType(fileExtension);
+                
+                formData.append('file', Buffer.from(mediaResponse.data), {
+                  filename: `template_media.${fileExtension}`,
+                  contentType: contentType
+                });
+                
+                const uploadResponse = await axios.post(
+                  `https://graph.facebook.com/v23.0/${phoneNumberId}/media`,
+                  formData,
+                  {
+                    headers: {
+                      'Authorization': `Bearer ${accessToken}`,
+                      ...formData.getHeaders()
+                    },
+                    maxBodyLength: Infinity,
+                    timeout: 60000
+                  }
+                );
+                
+                if (!uploadResponse.data?.id) {
+                  throw new Error('Failed to get media ID from WhatsApp');
+                }
+                
+                const mediaId = uploadResponse.data.id;
+                
+
+                const headerParam: any = {
+                  type: headerFormat.toLowerCase(),
+                  [headerFormat.toLowerCase()]: {
+                    id: mediaId
+                  }
+                };
+                
+                components.push({
+                  type: 'header',
+                  parameters: [headerParam]
+                });
+              } catch (uploadError: any) {
+                console.error('[Send Template] Failed to upload media, trying with link as fallback:', uploadError.message);
+                
+
+                const headerParam: any = {
+                  type: headerFormat.toLowerCase(),
+                  [headerFormat.toLowerCase()]: {
+                    link: mediaUrl
+                  }
+                };
+                
+                components.push({
+                  type: 'header',
+                  parameters: [headerParam]
+                });
+              }
+            } else {
+
+              return res.status(400).json({ 
+                error: `Template "${templateName}" requires media header but no media URL or media handle is configured. Please ensure the template was properly synced from Meta with media handle stored, or add media URLs to the template.` 
+              });
+            }
+          }
+        }
+
+
+        if (variables && Object.keys(variables).length > 0) {
+
+          let expectedVariables: string[] = [];
+          if (templateRecord && templateRecord.variables && Array.isArray(templateRecord.variables)) {
+            expectedVariables = templateRecord.variables;
+          } else {
+
+            expectedVariables = Object.keys(variables);
+          }
+
+
+
+
+
+
+          
+
+
+          const bodyParams = expectedVariables
+            .sort((a, b) => parseInt(a) - parseInt(b))
+            .map(varIndex => {
+              const value = variables[varIndex];
+
+              if (!value || (typeof value === 'string' && value.trim() === '')) {
+                throw new Error(`Variable ${varIndex} is required but not provided`);
+              }
+              return {
+                type: 'text' as const,
+                text: typeof value === 'string' ? value.trim() : String(value)
+              };
+            });
+
+
+          if (bodyParams.length > 0) {
+            components.push({
+              type: 'body',
+              parameters: bodyParams
+            });
+          }
+        }
+
+
+
+
+
+
+
+
+        const companyId = conversation.companyId || (user.isSuperAdmin ? 0 : user.companyId || 0);
+
+
+        const result = await whatsAppOfficialService.sendTemplateMessage(
+          channelId,
+          user.id,
+          companyId,
+          phoneNumber,
+          templateName,
+          languageCode || 'en',
+          components,
+          skipBroadcast === true // Allow skipping broadcast to prevent duplicate messages when initiating conversations
+        );
+
+        return res.json({ success: true, messageId: result.messageId || result.id });
+      } catch (error: any) {
+        console.error('Error sending template message:', error);
+        return res.status(500).json({ 
+          error: error.message || 'Failed to send template message' 
+        });
+      }
+    }
+  );
+
   app.post('/api/conversations/:id/upload-media', ensureAuthenticated, requireAnyPermission([PERMISSIONS.MANAGE_CHANNELS, PERMISSIONS.MANAGE_CONVERSATIONS]), (req, res, next) => {
 
 
@@ -8266,6 +10764,230 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+
+  app.post('/api/conversations/:id/upload-media-only', ensureAuthenticated, requireAnyPermission([PERMISSIONS.MANAGE_CHANNELS, PERMISSIONS.MANAGE_CONVERSATIONS]), (req, res, next) => {
+    const simpleUpload = multer({
+      storage: multer.diskStorage({
+        destination: function (req, file, cb) {
+          cb(null, UPLOAD_DIR);
+        },
+        filename: function (req, file, cb) {
+          const uniqueId = crypto.randomBytes(16).toString('hex');
+          const fileExt = path.extname(file.originalname) || '';
+          cb(null, `${uniqueId}${fileExt}`);
+        }
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 }
+    });
+
+    simpleUpload.single('file')(req, res, (err) => {
+      if (err) {
+        console.error('Multer error:', err);
+        return res.status(400).json({ error: 'Failed to process file upload' });
+      }
+      next();
+    });
+  }, async (req: any, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No media file uploaded' });
+      }
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        await fsExtra.unlink(req.file.path);
+        return res.status(404).json({ error: 'Conversation not found' });
+      }
+
+
+      let determinedMediaType: 'image' | 'video' | 'audio' | 'document' = 'document';
+      const mimeType = req.file.mimetype;
+
+      if (mimeType.startsWith('image/')) {
+        determinedMediaType = 'image';
+      } else if (mimeType.startsWith('video/')) {
+        determinedMediaType = 'video';
+      } else if (mimeType.startsWith('audio/')) {
+        determinedMediaType = 'audio';
+      } else {
+        determinedMediaType = 'document';
+      }
+
+
+      const host = req.get('host') || `localhost:${process.env.PORT || 9100}`;
+      const protocol = host.includes('localhost') ? 'http' : req.protocol;
+      const publicUrl = `${protocol}://${host}/uploads/${path.basename(req.file.path)}`;
+      const publicPath = path.join(process.cwd(), 'uploads', path.basename(req.file.path));
+
+
+      if (path.resolve(req.file.path) !== path.resolve(publicPath)) {
+        await fsExtra.copy(req.file.path, publicPath);
+      }
+
+
+      let finalMimeType = req.file.mimetype;
+      let finalFilename = req.file.originalname;
+
+      if (conversation.channelType === 'whatsapp_official' && determinedMediaType === 'audio') {
+        const supportedAudioTypes = [
+          'audio/aac', 'audio/mp4', 'audio/mpeg', 'audio/amr', 'audio/ogg', 'audio/opus'
+        ];
+
+        if (!supportedAudioTypes.includes(req.file.mimetype)) {
+          const { convertAudioForWhatsAppWithFallback } = await import('./utils/audio-converter');
+          const tempDir = path.join(process.cwd(), 'temp', 'audio');
+          await fsExtra.ensureDir(tempDir);
+
+          try {
+            const conversionResult = await convertAudioForWhatsAppWithFallback(
+              req.file.path,
+              tempDir,
+              req.file.originalname
+            );
+
+            const convertedBasename = path.basename(conversionResult.outputPath);
+            const convertedPublicPath = path.join(process.cwd(), 'uploads', convertedBasename);
+            await fsExtra.copy(conversionResult.outputPath, convertedPublicPath);
+
+            finalMimeType = conversionResult.mimeType;
+            finalFilename = convertedBasename;
+
+
+            const newPublicUrl = `${protocol}://${host}/uploads/${convertedBasename}`;
+            
+            await fsExtra.unlink(conversionResult.outputPath);
+            await fsExtra.unlink(req.file.path); // Clean up original file
+            
+            return res.json({
+              success: true,
+              mediaUrl: newPublicUrl,
+              mediaType: determinedMediaType,
+              fileName: finalFilename,
+              fileSize: req.file.size,
+              mimeType: finalMimeType
+            });
+          } catch (conversionError) {
+            console.error('Audio conversion failed:', conversionError);
+
+          }
+        }
+      }
+
+
+      await fsExtra.unlink(req.file.path);
+
+      return res.json({
+        success: true,
+        mediaUrl: publicUrl,
+        mediaType: determinedMediaType,
+        fileName: finalFilename,
+        fileSize: req.file.size,
+        mimeType: finalMimeType
+      });
+
+    } catch (error: any) {
+      console.error('Error uploading media file:', error);
+
+      if (req.file && req.file.path) {
+        try {
+          await fsExtra.unlink(req.file.path);
+        } catch (unlinkError) {
+          console.error('Error deleting uploaded file:', unlinkError);
+        }
+      }
+
+      return res.status(500).json({
+        error: 'Internal server error',
+        message: error.message
+      });
+    }
+  });
+
+
+  app.post('/api/scheduled-messages/upload-media', ensureAuthenticated, requireAnyPermission([PERMISSIONS.MANAGE_CHANNELS, PERMISSIONS.MANAGE_CONVERSATIONS]), async (req, res, next) => {
+    const multer = (await import('multer')).default;
+    const path = (await import('path')).default;
+    const crypto = (await import('crypto')).default;
+    
+    const scheduledUpload = multer({
+      storage: multer.diskStorage({
+        destination: async function (req: any, file: any, cb: any) {
+          const scheduledDir = path.join(process.cwd(), 'uploads', 'scheduled-media');
+          const fsExtra = (await import('fs-extra')).default;
+          fsExtra.ensureDirSync(scheduledDir);
+          cb(null, scheduledDir);
+        },
+        filename: function (req: any, file: any, cb: any) {
+          const uniqueId = crypto.randomBytes(16).toString('hex');
+          const fileExt = path.extname(file.originalname) || '';
+          cb(null, `scheduled_${uniqueId}${fileExt}`);
+        }
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+    });
+
+    scheduledUpload.single('file')(req, res, (err: any) => {
+      if (err) {
+        console.error('Scheduled media upload error:', err);
+        return res.status(400).json({ error: 'Failed to process file upload' });
+      }
+      next();
+    });
+  }, async (req: any, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No media file uploaded' });
+      }
+
+
+      let determinedMediaType: 'image' | 'video' | 'audio' | 'document' = 'document';
+      const mimeType = req.file.mimetype;
+
+      if (mimeType.startsWith('image/')) {
+        determinedMediaType = 'image';
+      } else if (mimeType.startsWith('video/')) {
+        determinedMediaType = 'video';
+      } else if (mimeType.startsWith('audio/')) {
+        determinedMediaType = 'audio';
+      } else {
+        determinedMediaType = 'document';
+      }
+
+
+      const mediaFilePath = req.file.path;
+      
+
+
+      return res.json({
+        success: true,
+        mediaFilePath: mediaFilePath,
+        mediaType: determinedMediaType,
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        mimeType: req.file.mimetype
+      });
+
+    } catch (error: any) {
+      console.error('Error uploading scheduled media file:', error);
+
+      if (req.file && req.file.path) {
+        try {
+          const fs = (await import('fs-extra')).default;
+          await fs.unlink(req.file.path);
+        } catch (unlinkError) {
+          console.error('Error deleting uploaded file:', unlinkError);
+        }
+      }
+
+      return res.status(500).json({
+        error: 'Internal server error',
+        message: error.message
+      });
+    }
+  });
+
   app.get('/api/contacts/:id/notes', ensureAuthenticated, async (req, res) => {
     const contactId = parseInt(req.params.id);
     const notes = await storage.getNotesByContact(contactId);
@@ -8585,6 +11307,311 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+
+  app.get('/api/flows/:id/variables', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const flowId = parseInt(req.params.id);
+      const userId = req.user?.id;
+      const companyId = req.user?.companyId;
+
+      if (!flowId || isNaN(flowId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid flow ID'
+        });
+      }
+
+      const flow = await storage.getFlow(flowId);
+      if (!flow) {
+        return res.status(404).json({
+          success: false,
+          error: 'Flow not found'
+        });
+      }
+
+      if (flow.userId !== userId && flow.companyId !== companyId) {
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied'
+        });
+      }
+
+      const nodes = flow.nodes as any[] || [];
+      const dataCaptureNodes = nodes.filter(node => 
+        node.type === 'data_capture' && 
+        node.data?.captureRules?.length > 0
+      );
+
+      const codeExecutionNodes = nodes.filter(node => 
+        node.type === 'code_execution' && 
+        node.data?.code
+      );
+
+      const capturedVariables: Array<{
+        variableKey: string;
+        label: string;
+        description: string;
+        variableType: string;
+        nodeId: string;
+        nodeName: string;
+        required: boolean;
+      }> = [];
+
+      dataCaptureNodes.forEach(node => {
+        const captureRules = node.data.captureRules || [];
+        const nodeName = node.data.label || `Data Capture ${node.id}`;
+
+        captureRules.forEach((rule: any) => {
+          if (rule.variableName) {
+            capturedVariables.push({
+              variableKey: rule.variableName,
+              label: rule.variableName.replace(/_/g, ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()),
+              description: rule.description || `Captured from ${nodeName}`,
+              variableType: rule.dataType || 'string',
+              nodeId: node.id,
+              nodeName,
+              required: rule.required || false
+            });
+          }
+        });
+      });
+
+      codeExecutionNodes.forEach(node => {
+        const nodeName = node.data.label || `Code Execution ${node.id}`;
+        
+        capturedVariables.push({
+          variableKey: 'code_execution_output',
+          label: 'Code Execution Output',
+          description: `Output variables from ${nodeName}`,
+          variableType: 'object',
+          nodeId: node.id,
+          nodeName,
+          required: false
+        });
+      });
+
+      const uniqueVariables = capturedVariables.reduce((acc, variable) => {
+        const existing = acc.find(v => v.variableKey === variable.variableKey);
+        if (!existing) {
+          acc.push(variable);
+        }
+        return acc;
+      }, [] as typeof capturedVariables);
+
+      logger.info('FlowVariables', `Retrieved ${uniqueVariables.length} captured variables for flow ${flowId}`, {
+        flowId,
+        userId,
+        variableCount: uniqueVariables.length,
+        dataCaptureNodeCount: dataCaptureNodes.length,
+        codeExecutionNodeCount: codeExecutionNodes.length
+      });
+
+      res.json({
+        success: true,
+        variables: uniqueVariables,
+        meta: {
+          flowId,
+          flowName: flow.name,
+          dataCaptureNodeCount: dataCaptureNodes.length,
+          codeExecutionNodeCount: codeExecutionNodes.length,
+          totalVariableCount: uniqueVariables.length
+        }
+      });
+
+    } catch (error) {
+      logger.error('FlowVariables', 'Error getting flow variables', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  });
+
+
+  app.get('/api/flows/:id/sessions', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const flowId = parseInt(req.params.id);
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      if (!flowId || isNaN(flowId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Valid flow ID is required'
+        });
+      }
+
+      const sessions = await storage.getRecentFlowSessions(flowId, limit, offset);
+
+      logger.info('FlowVariables', `Retrieved ${sessions.length} recent sessions for flow ${flowId}`, {
+        flowId,
+        sessionCount: sessions.length,
+        limit,
+        offset
+      });
+
+      res.json({
+        success: true,
+        sessions,
+        meta: {
+          flowId,
+          count: sessions.length,
+          limit,
+          offset
+        }
+      });
+
+    } catch (error) {
+      logger.error('FlowVariables', 'Error fetching recent flow sessions', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  });
+
+
+  app.delete('/api/flows/:id/sessions', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const flowId = parseInt(req.params.id);
+
+      if (!flowId || isNaN(flowId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Valid flow ID is required'
+        });
+      }
+
+      const deletedCount = await storage.deleteAllFlowSessions(flowId);
+
+      logger.info('FlowVariables', `Deleted ${deletedCount} sessions for flow ${flowId}`, {
+        flowId,
+        deletedCount
+      });
+
+      res.json({
+        success: true,
+        message: `Successfully deleted ${deletedCount} sessions`,
+        deletedCount
+      });
+
+    } catch (error) {
+      logger.error('FlowVariables', 'Error deleting flow sessions', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  });
+
+
+  app.get('/api/sessions/:sessionId/variables', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const sessionId = req.params.sessionId;
+      const scope = req.query.scope as string;
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      if (!sessionId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Session ID is required'
+        });
+      }
+
+      if (limit < 1 || limit > 100) {
+        return res.status(400).json({
+          success: false,
+          error: 'Limit must be between 1 and 100'
+        });
+      }
+
+      if (offset < 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Offset must be non-negative'
+        });
+      }
+
+      const validScopes = ['global', 'flow', 'node', 'user', 'session'] as const;
+      const validatedScope = scope && validScopes.includes(scope as any) ? scope as typeof validScopes[number] : 'session';
+
+      const { variables, totalCount } = await storage.getFlowVariablesPaginated(sessionId, {
+        scope: validatedScope,
+        limit,
+        offset
+      });
+
+      logger.info('FlowVariables', `Retrieved ${variables.length} variable values for session ${sessionId} (${offset}-${offset + variables.length} of ${totalCount})`, {
+        sessionId,
+        scope,
+        limit,
+        offset,
+        variableCount: variables.length,
+        totalCount
+      });
+
+      res.json({
+        success: true,
+        variables: variables.reduce((acc, variable) => {
+          acc[variable.variableKey] = variable.variableValue;
+          return acc;
+        }, {} as Record<string, any>),
+        details: variables,
+        meta: {
+          sessionId,
+          scope: validatedScope,
+          count: variables.length,
+          totalCount,
+          limit,
+          offset,
+          hasMore: offset + variables.length < totalCount
+        }
+      });
+
+    } catch (error) {
+      logger.error('FlowVariables', 'Error getting session variables', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  });
+
+
+  app.delete('/api/sessions/:sessionId/variables', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const sessionId = req.params.sessionId;
+      const scope = req.query.scope as string;
+
+      if (!sessionId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Session ID is required'
+        });
+      }
+
+      await storage.clearFlowVariables(sessionId, scope);
+
+      logger.info('FlowVariables', `Cleared variables for session ${sessionId}`, {
+        sessionId,
+        scope
+      });
+
+      res.json({
+        success: true,
+        message: 'Variables cleared successfully'
+      });
+
+    } catch (error) {
+      logger.error('FlowVariables', 'Error clearing session variables', error);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  });
+
   app.get('/api/flow-assignments', ensureAuthenticated, async (req, res) => {
     try {
       const { channelId, flowId } = req.query;
@@ -8622,7 +11649,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         data: assignment
       });
     } catch (err: any) {
-      res.status(400).json({ message: err.message });
+      console.error('❌ Error creating flow assignment:', err);
+
+
+      let errorMessage = err.message;
+      if (err.message.includes('already assigned to')) {
+        errorMessage = `Cannot assign flow: ${err.message}`;
+      }
+
+      res.status(400).json({ message: errorMessage });
     }
   });
 
@@ -8645,15 +11680,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(403).json({ message: 'You do not have permission to update this assignment' });
       }
 
+
+
       const updatedAssignment = await storage.updateFlowAssignmentStatus(id, isActive);
+
+      
+
       res.json(updatedAssignment);
+
 
       broadcastToAll({
         type: 'flowAssignmentUpdated',
         data: updatedAssignment
       });
+
+
+      broadcastToAll({
+        type: 'flowAssignmentStatusChanged',
+        data: {
+          assignmentId: id,
+          flowId: updatedAssignment.flowId,
+          channelId: updatedAssignment.channelId,
+          isActive: updatedAssignment.isActive,
+          timestamp: new Date().toISOString()
+        }
+      });
+
+
+      if ((global as any).flowAssignmentEventEmitter) {
+        (global as any).flowAssignmentEventEmitter.emit('flowAssignmentStatusChanged', {
+          assignmentId: id,
+          flowId: updatedAssignment.flowId,
+          channelId: updatedAssignment.channelId,
+          isActive: updatedAssignment.isActive,
+          timestamp: new Date().toISOString()
+        });
+      }
+
     } catch (err: any) {
-      res.status(400).json({ message: err.message });
+      console.error('❌ Error updating flow assignment status:', err);
+
+
+      let errorMessage = err.message;
+      if (err.message.includes('already active on')) {
+        errorMessage = `Cannot activate: ${err.message}`;
+      } else if (err.message.includes('already assigned to')) {
+        errorMessage = `Cannot assign: ${err.message}`;
+      }
+
+      res.status(400).json({ message: errorMessage });
     }
   });
 
@@ -12417,13 +15492,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         const allEmailConnections = await storage.getChannelConnectionsByType('email');
         const companyEmailConnections = allEmailConnections.filter(conn => conn.companyId === user.companyId);
-        console.log(`🔍 Manual sync: Available email connections for company ${user.companyId}:`,
-          companyEmailConnections.map(conn => ({
-            id: conn.id,
-            accountName: conn.accountName,
-            status: conn.status
-          }))
-        );
+     
 
         return res.status(400).json({
           success: false,
@@ -14933,94 +18002,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get('/api/webhooks/instagram', async (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
 
-    console.log('Instagram webhook verification attempt:', {
-      mode,
-      token: token ? `${token.toString().substring(0, 8)}...` : 'undefined',
-      challenge: challenge ? `${challenge.toString().substring(0, 8)}...` : 'undefined',
-      userAgent: req.get('User-Agent'),
-      ip: req.ip
-    });
-
-    if (mode !== 'subscribe') {
-      return res.status(403).send('Forbidden');
-    }
-
-    try {
-      const instagramConnections = await storage.getChannelConnectionsByType('instagram');
-
-      let matchingConnection = null;
-      for (const connection of instagramConnections) {
-        const connectionData = connection.connectionData as any;
-        if (connectionData?.verifyToken === token) {
-          matchingConnection = connection;
-          break;
-        }
-      }
-
-      const globalToken = process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN;
-      const isGlobalMatch = globalToken && token === globalToken;
-
-      if (matchingConnection || isGlobalMatch) {
-                res.status(200).send(challenge);
-      } else {
-        console.log('❌ Instagram webhook verification failed:', {
-          receivedToken: token,
-          globalToken: globalToken,
-          checkedConnections: instagramConnections.length,
-          availableTokens: instagramConnections.map(conn => {
-            const data = conn.connectionData as any;
-            return data?.verifyToken ? `${data.verifyToken.substring(0, 8)}...` : 'none';
-          })
-        });
-        res.status(403).send('Forbidden');
-      }
-    } catch (error) {
-      console.error('Error during Instagram webhook verification:', error);
-      res.status(500).send('Internal Server Error');
-    }
-  });
-
-  app.post('/api/webhooks/instagram', async (req, res) => {
-    try {
-      const signature = req.headers['x-hub-signature-256'] as string;
-      const body = req.body;
-
-      console.log('Instagram webhook received:', {
-        hasSignature: !!signature,
-        bodyType: typeof body,
-        contentType: req.get('content-type'),
-        headers: {
-          'x-hub-signature-256': signature ? 'present' : 'missing',
-          'user-agent': req.get('user-agent')
-        }
-      });
-
-      let targetConnection = null;
-      if (body?.entry && Array.isArray(body.entry) && body.entry.length > 0) {
-        const instagramAccountId = body.entry[0]?.id;
-        if (instagramAccountId) {
-          const instagramConnections = await storage.getChannelConnectionsByType('instagram');
-          targetConnection = instagramConnections.find((conn: any) => {
-            const connectionData = conn.connectionData as any;
-            return connectionData?.instagramAccountId === instagramAccountId;
-          });
-
-                  }
-      }
-
-      await instagramService.processWebhook(body, signature, targetConnection?.companyId || undefined);
-
-      res.status(200).send('OK');
-    } catch (error) {
-      console.error('Error processing Instagram webhook:', error);
-      res.status(500).send('Internal Server Error');
-    }
-  });
 
 
   app.post('/api/instagram/test-webhook', ensureAuthenticated, async (req: any, res) => {
@@ -15136,6 +18118,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
 
+  const qrGenerationRateLimits = new Map<string, number>();
+  const QR_RATE_LIMIT_WINDOW = 5000; // 5 seconds
+
   app.post('/api/telegram/generate-qr', ensureAuthenticated, async (req: any, res) => {
     try {
       const { connectionId } = req.body;
@@ -15145,6 +18130,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
           success: false,
           message: 'Connection ID is required'
         });
+      }
+
+
+      const rateLimitKey = `${req.user.id}-${connectionId}`;
+      const lastGeneration = qrGenerationRateLimits.get(rateLimitKey) || 0;
+      const now = Date.now();
+      
+      if (now - lastGeneration < QR_RATE_LIMIT_WINDOW) {
+        const remainingTime = Math.ceil((QR_RATE_LIMIT_WINDOW - (now - lastGeneration)) / 1000);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${remainingTime} seconds before generating a new QR code`,
+          retryAfter: remainingTime
+        });
+      }
+
+
+      qrGenerationRateLimits.set(rateLimitKey, now);
+      
+
+      if (qrGenerationRateLimits.size > 1000) {
+        const cutoff = now - 60000;
+        for (const key of qrGenerationRateLimits.keys()) {
+          const timestamp = qrGenerationRateLimits.get(key);
+          if (timestamp && timestamp < cutoff) {
+            qrGenerationRateLimits.delete(key);
+          }
+        }
       }
 
       const qrResult = await telegramService.generateQRCode(connectionId, req.user.id);
@@ -15331,6 +18344,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ message: 'Instagram connection initiated' });
     } catch (err: any) {
       console.error('Error in Instagram connect endpoint:', err);
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+
+  app.post('/api/instagram/fix-status/:connectionId', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const connectionId = parseInt(req.params.connectionId);
+      const connection = await storage.getChannelConnection(connectionId);
+
+      if (!connection) {
+        return res.status(404).json({ message: 'Connection not found' });
+      }
+
+      if (req.user.companyId && connection.companyId !== req.user.companyId) {
+        return res.status(403).json({ message: 'Access denied: Connection does not belong to your company' });
+      }
+
+      if (connection.channelType !== 'instagram') {
+        return res.status(400).json({ message: 'Connection is not an Instagram connection' });
+      }
+
+
+      await storage.updateChannelConnectionStatus(connectionId, 'active');
+      
+
+      const { updateConnectionActivity } = await import('./services/channels/instagram');
+      updateConnectionActivity(connectionId, true);
+
+
+      
+      res.json({ 
+        message: 'Instagram connection status fixed', 
+        connectionId: connectionId,
+        status: 'active'
+      });
+    } catch (err: any) {
+      console.error('Error fixing Instagram connection status:', err);
       res.status(400).json({ message: err.message });
     }
   });
@@ -15589,6 +18640,141 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     } catch (err: any) {
       console.error('Error sending Messenger message:', err);
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+
+  app.post('/api/scheduled-messages', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const { 
+        conversationId, 
+        content, 
+        scheduledFor, 
+        messageType = 'text',
+        mediaUrl,
+        mediaFilePath,
+        mediaType,
+        caption,
+        timezone = 'UTC',
+        metadata = {}
+      } = req.body;
+
+      if (!conversationId || !content || !scheduledFor) {
+        return res.status(400).json({ message: 'Conversation ID, content, and scheduled time are required' });
+      }
+
+
+      const scheduledDate = new Date(scheduledFor);
+      if (scheduledDate <= new Date()) {
+        return res.status(400).json({ message: 'Scheduled time must be in the future' });
+      }
+
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+
+      if (req.user.companyId && conversation.companyId !== req.user.companyId) {
+        return res.status(403).json({ message: 'Access denied: Conversation does not belong to your company' });
+      }
+
+      if (!conversation.companyId) {
+        return res.status(400).json({ message: 'Conversation must belong to a company' });
+      }
+
+
+      const channelConnection = await storage.getChannelConnection(conversation.channelId);
+      if (!channelConnection) {
+        return res.status(404).json({ message: 'Channel connection not found' });
+      }
+
+      const { ScheduledMessageService } = await import('./services/scheduled-message-service');
+      
+      const scheduledMessage = await ScheduledMessageService.createScheduledMessage({
+        companyId: conversation.companyId,
+        conversationId: conversation.id,
+        channelId: conversation.channelId,
+        channelType: channelConnection.channelType,
+        content,
+        messageType,
+        mediaUrl,
+        mediaFilePath,
+        mediaType,
+        caption,
+        scheduledFor: scheduledDate,
+        timezone,
+        metadata,
+        createdBy: req.user.id
+      });
+
+      res.status(201).json({
+        success: true,
+        scheduledMessage
+      });
+    } catch (err: any) {
+      console.error('Error creating scheduled message:', err);
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+  app.get('/api/scheduled-messages/:conversationId', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      
+
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        return res.status(404).json({ message: 'Conversation not found' });
+      }
+
+      if (req.user.companyId && conversation.companyId !== req.user.companyId) {
+        return res.status(403).json({ message: 'Access denied: Conversation does not belong to your company' });
+      }
+
+      if (!conversation.companyId) {
+        return res.status(400).json({ message: 'Conversation must belong to a company' });
+      }
+
+      const { ScheduledMessageService } = await import('./services/scheduled-message-service');
+      const scheduledMessages = await ScheduledMessageService.getScheduledMessagesForConversation(
+        conversationId, 
+        conversation.companyId
+      );
+
+      res.json({ scheduledMessages });
+    } catch (err: any) {
+      console.error('Error fetching scheduled messages:', err);
+      res.status(400).json({ message: err.message });
+    }
+  });
+
+  app.delete('/api/scheduled-messages/:id', ensureAuthenticated, async (req: any, res) => {
+    try {
+      const scheduledMessageId = parseInt(req.params.id);
+      
+
+      const scheduledMessage = await storage.db
+        .select()
+        .from(scheduledMessages)
+        .where(eq(scheduledMessages.id, scheduledMessageId))
+        .limit(1);
+
+      if (scheduledMessage.length === 0) {
+        return res.status(404).json({ message: 'Scheduled message not found' });
+      }
+
+      if (req.user.companyId && scheduledMessage[0].companyId !== req.user.companyId) {
+        return res.status(403).json({ message: 'Access denied: Scheduled message does not belong to your company' });
+      }
+
+      const { ScheduledMessageService } = await import('./services/scheduled-message-service');
+      await ScheduledMessageService.deleteScheduledMessage(scheduledMessageId, req.user.companyId);
+
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error('Error deleting scheduled message:', err);
       res.status(400).json({ message: err.message });
     }
   });

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import Stripe from 'stripe';
+import paypal from '@paypal/checkout-server-sdk';
 import { storage } from '../storage';
 import { db } from '../db';
 import {
@@ -85,9 +86,7 @@ router.post('/enable-renewal', ensureAuthenticated, async (req: any, res) => {
     }
 
     const stripeConfig = stripeSettings.value as any;
-    subscriptionManager['stripe'] = require('stripe')(stripeConfig.secretKey, {
-      apiVersion: '2025-08-27.basil'
-    });
+    subscriptionManager['stripe'] = require('stripe')(stripeConfig.secretKey);
 
     const result = await subscriptionManager.enableAutomaticRenewal(companyId, paymentMethodId);
 
@@ -1337,6 +1336,20 @@ async function getCompanyPaymentGateway(companyId: number): Promise<string> {
 /**
  * Create Stripe payment session for subscription renewal
  */
+
+async function getDefaultCurrency(): Promise<string> {
+  try {
+    const generalSettings = await storage.getAppSetting('general_settings');
+    if (generalSettings?.value && typeof generalSettings.value === 'object') {
+      const settings = generalSettings.value as any;
+      return settings.defaultCurrency || 'USD';
+    }
+    return 'USD';
+  } catch (error) {
+    return 'USD';
+  }
+}
+
 async function createStripePaymentSession(company: any, plan: any, enableAutoRenewal: boolean = false): Promise<{ id: string; url: string }> {
   const stripeSettings = await storage.getAppSetting('payment_stripe');
   if (!stripeSettings?.value) {
@@ -1344,15 +1357,22 @@ async function createStripePaymentSession(company: any, plan: any, enableAutoRen
   }
 
   const stripeConfig = stripeSettings.value as any;
-  const stripe = new Stripe(stripeConfig.secretKey, {
-    apiVersion: '2025-08-27.basil',
-  });
+  const stripe = new Stripe(stripeConfig.secretKey);
+
+  const defaultCurrency = await getDefaultCurrency();
+  const currencyLower = defaultCurrency.toLowerCase();
+  
+
+  const supportedCurrencies = ['usd', 'eur', 'gbp', 'cad', 'aud', 'jpy', 'chf', 'nzd', 'sek', 'nok', 'dkk', 'pln', 'czk', 'huf', 'ron', 'bgn', 'hrk', 'rub', 'try', 'brl', 'mxn', 'ars', 'clp', 'cop', 'pen', 'inr', 'sgd', 'hkd', 'krw', 'twd', 'thb', 'myr', 'php', 'idr', 'vnd', 'aed', 'sar', 'ils', 'zar', 'ngn', 'egp', 'kes'];
+  if (!supportedCurrencies.includes(currencyLower)) {
+    throw new Error(`Currency ${defaultCurrency} is not supported by Stripe`);
+  }
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
     line_items: [{
       price_data: {
-        currency: 'usd',
+        currency: currencyLower,
         product_data: {
           name: `${plan.name} Subscription Renewal`,
           description: `Renewal for ${company.name}`,
@@ -1390,11 +1410,42 @@ async function createMoyasarPaymentSession(company: any, plan: any, enableAutoRe
     throw new Error('Moyasar not configured');
   }
 
-  const moyasarConfig = moyasarSettings.value as any;
+  const defaultCurrency = await getDefaultCurrency();
   
 
+  if (defaultCurrency.toUpperCase() !== 'SAR') {
+    throw new Error(`Moyasar only supports SAR (Saudi Riyal). Current configured currency is ${defaultCurrency}`);
+  }
 
-  throw new Error('Moyasar payment gateway not yet implemented for renewals');
+  const moyasarConfig = moyasarSettings.value as any;
+  
+  if (!moyasarConfig.publishableKey) {
+    throw new Error('Moyasar publishable key is missing');
+  }
+
+
+  const transaction = await storage.createPaymentTransaction({
+    companyId: company.id,
+    planId: plan.id,
+    amount: plan.price,
+    currency: 'SAR',
+    status: 'pending',
+    paymentMethod: 'moyasar',
+    metadata: {
+      renewalType: 'subscription_renewal',
+      enableAutoRenewal: enableAutoRenewal.toString(),
+      isPlanChange: (plan.id !== company.planId).toString()
+    }
+  });
+
+
+
+  const callbackUrl = `${process.env.BASE_URL || 'http://localhost:5000'}/payment/success?source=moyasar&transaction_id=${transaction.id}&renewal=true`;
+  
+  return {
+    id: transaction.id.toString(),
+    url: callbackUrl // Return callback URL for client-side handling
+  };
 }
 
 /**
@@ -1406,11 +1457,78 @@ async function createPayPalPaymentSession(company: any, plan: any, enableAutoRen
     throw new Error('PayPal not configured');
   }
 
-  const paypalConfig = paypalSettings.value as any;
+  const defaultCurrency = await getDefaultCurrency();
   
 
+  const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+  if (!supportedCurrencies.includes(defaultCurrency.toUpperCase())) {
+    throw new Error(`Currency ${defaultCurrency} may not be supported by PayPal`);
+  }
 
-  throw new Error('PayPal payment gateway not yet implemented for renewals');
+  const paypalConfig = paypalSettings.value as any;
+  
+  let environment;
+  if (paypalConfig.testMode) {
+    environment = new paypal.core.SandboxEnvironment(
+      paypalConfig.clientId,
+      paypalConfig.clientSecret
+    );
+  } else {
+    environment = new paypal.core.LiveEnvironment(
+      paypalConfig.clientId,
+      paypalConfig.clientSecret
+    );
+  }
+
+  const client = new paypal.core.PayPalHttpClient(environment);
+
+
+  const transaction = await storage.createPaymentTransaction({
+    companyId: company.id,
+    planId: plan.id,
+    amount: plan.price,
+    currency: defaultCurrency,
+    status: 'pending',
+    paymentMethod: 'paypal',
+    metadata: {
+      renewalType: 'subscription_renewal',
+      enableAutoRenewal: enableAutoRenewal.toString(),
+      isPlanChange: (plan.id !== company.planId).toString()
+    }
+  });
+
+  const request = new paypal.orders.OrdersCreateRequest();
+  request.prefer("return=representation");
+  request.requestBody({
+    intent: 'CAPTURE',
+    purchase_units: [{
+      amount: {
+        currency_code: defaultCurrency.toUpperCase(),
+        value: plan.price.toString()
+      },
+      description: `${plan.name} Subscription Renewal`,
+      custom_id: transaction.id.toString()
+    }] as any,
+    application_context: {
+      brand_name: 'PowerChatPlus',
+      landing_page: 'BILLING',
+      user_action: 'PAY_NOW',
+      return_url: `${process.env.BASE_URL || 'http://localhost:5000'}/payment/success?source=paypal&transaction_id=${transaction.id}&renewal=true`,
+      cancel_url: `${process.env.BASE_URL || 'http://localhost:5000'}/payment/cancelled`
+    }
+  });
+
+  const response = await client.execute(request);
+
+  const approvalLink = response.result.links.find((link: any) => link.rel === 'approve');
+  if (!approvalLink) {
+    throw new Error('PayPal approval URL not found');
+  }
+
+  return {
+    id: transaction.id.toString(),
+    url: approvalLink.href
+  };
 }
 
 /**
@@ -1422,11 +1540,81 @@ async function createMercadoPagoPaymentSession(company: any, plan: any, enableAu
     throw new Error('Mercado Pago not configured');
   }
 
-  const mercadoPagoConfig = mercadoPagoSettings.value as any;
+  const defaultCurrency = await getDefaultCurrency();
   
 
+  const supportedCurrencies = ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'VEF'];
+  if (!supportedCurrencies.includes(defaultCurrency.toUpperCase())) {
+    throw new Error(`Currency ${defaultCurrency} may not be supported by Mercado Pago. Supported currencies: ${supportedCurrencies.join(', ')}`);
+  }
 
-  throw new Error('Mercado Pago payment gateway not yet implemented for renewals');
+  const mercadoPagoConfig = mercadoPagoSettings.value as any;
+  
+  if (!mercadoPagoConfig.clientId || !mercadoPagoConfig.clientSecret || !mercadoPagoConfig.accessToken) {
+    throw new Error('Mercado Pago settings are incomplete');
+  }
+
+
+  const transaction = await storage.createPaymentTransaction({
+    companyId: company.id,
+    planId: plan.id,
+    amount: plan.price,
+    currency: defaultCurrency,
+    status: 'pending',
+    paymentMethod: 'mercadopago',
+    metadata: {
+      renewalType: 'subscription_renewal',
+      enableAutoRenewal: enableAutoRenewal.toString(),
+      isPlanChange: (plan.id !== company.planId).toString()
+    }
+  });
+
+  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+  const preferenceData = {
+    items: [
+      {
+        title: `${plan.name} Subscription Renewal`,
+        description: `Renewal for ${company.name}`,
+        quantity: 1,
+        currency_id: defaultCurrency.toUpperCase(),
+        unit_price: plan.price
+      }
+    ],
+    back_urls: {
+      success: `${baseUrl}/payment/success?source=mercadopago&transaction_id=${transaction.id}&renewal=true`,
+      failure: `${baseUrl}/payment/cancel?source=mercadopago&transaction_id=${transaction.id}`,
+      pending: `${baseUrl}/payment/pending?source=mercadopago&transaction_id=${transaction.id}`
+    },
+    auto_return: 'approved',
+    external_reference: transaction.id.toString(),
+    notification_url: `${baseUrl}/api/webhooks/mercadopago`
+  };
+
+  const apiUrl = 'https://api.mercadopago.com/checkout/preferences';
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${mercadoPagoConfig.accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(preferenceData)
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(`Failed to create Mercado Pago preference: ${errorData.message || response.statusText}`);
+  }
+
+  const responseData = await response.json();
+
+  if (!responseData || !responseData.init_point) {
+    throw new Error('Invalid response from Mercado Pago API');
+  }
+
+  return {
+    id: transaction.id.toString(),
+    url: responseData.init_point
+  };
 }
 
 /**
@@ -1444,11 +1632,13 @@ async function handleBankTransferRenewal(company: any, plan: any, userEmail: str
   const bankConfig = bankTransferSettings.value as any;
   
 
+  const defaultCurrency = await getDefaultCurrency();
+  
   const transaction = await storage.createPaymentTransaction({
     companyId: company.id,
     planId: plan.id,
     amount: plan.price,
-    currency: 'USD',
+    currency: defaultCurrency,
     status: 'pending',
     paymentMethod: 'bank_transfer',
     metadata: {

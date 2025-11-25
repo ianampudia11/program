@@ -286,11 +286,11 @@ class SmartWebSocketBroadcaster {
     const message = JSON.stringify(event);
     let successCount = 0;
     let failureCount = 0;
+    let skippedCount = 0;
 
     targetClients.forEach(clientId => {
       let client;
       let socket;
-
 
       if (this.externalClientMap) {
         client = this.externalClientMap.get(clientId);
@@ -303,6 +303,16 @@ class SmartWebSocketBroadcaster {
       if (!client || !socket || socket.readyState !== WebSocket.OPEN) {
         failureCount++;
         return;
+      }
+
+
+      const MAX_BUFFERED_AMOUNT = 1024 * 1024; // 1MB threshold
+      if (socket.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+        skippedCount++;
+
+        if (event.priority === 'low' || event.type === 'whatsappQrCode') {
+          return;
+        }
       }
 
       try {
@@ -319,8 +329,11 @@ class SmartWebSocketBroadcaster {
       }
     });
 
-    if (successCount > 0) {
+    if (successCount > 0 || skippedCount > 0) {
 
+      if (skippedCount > 0) {
+        console.warn(`Smart broadcaster: Skipped ${skippedCount} events due to backpressure`);
+      }
     }
   }
 

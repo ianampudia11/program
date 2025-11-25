@@ -30,7 +30,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # BotHive Application (Backend + Frontend)
+  # PowerChat Application (Backend + Frontend)
   app:
     build:
       context: ../..
@@ -108,9 +108,12 @@ services:
       - ENABLE_BACKUP_SCHEDULER=${ENABLE_BACKUP_SCHEDULER:-true}
       - ENABLE_ANALYTICS=${ENABLE_ANALYTICS:-true}
       - ENABLE_FLOW_BUILDER=${ENABLE_FLOW_BUILDER:-true}
+      
+      # Docker Environment Detection
+      - DOCKER_CONTAINER=true
 
     ports:
-      - "${APP_PORT}:5000"
+      - "${APP_PORT}:9000"
     volumes:
       # Instance-specific data directories
       - ${INSTANCE_NAME}_uploads:/app/data/uploads

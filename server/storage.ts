@@ -4,6 +4,7 @@ import {
   contactDocuments, type ContactDocument, type InsertContactDocument,
   contactAppointments, type ContactAppointment, type InsertContactAppointment,
   contactTasks, type ContactTask, type InsertContactTask,
+  taskCategories, type TaskCategory, type InsertTaskCategory,
   contactAuditLogs, type ContactAuditLog, type InsertContactAuditLog,
   conversations, type Conversation, type InsertConversation,
   groupParticipants, type GroupParticipant, type InsertGroupParticipant,
@@ -43,7 +44,9 @@ import {
   translationNamespaces,
   translationKeys,
   translations,
+  whatsappProxyServers,
   systemUpdates, type SystemUpdate, type InsertSystemUpdate,
+  scheduledMessages, type ScheduledMessage, type InsertScheduledMessage,
 
   userSocialAccounts, type UserSocialAccount, type InsertUserSocialAccount, type SocialProvider,
   emailConfigs, type EmailConfig, type InsertEmailConfig,
@@ -67,11 +70,14 @@ import {
   websites, type Website, type InsertWebsite,
   websiteAssets, type WebsiteAsset, type InsertWebsiteAsset,
 
+  databaseBackups, type DatabaseBackup, type InsertDatabaseBackup,
+  databaseBackupLogs, type DatabaseBackupLog, type InsertDatabaseBackupLog,
+
   type DealStatus, type DealPriority,
   type CompanySetting} from "@shared/schema";
 
 import session from "express-session";
-import { eq, and, desc, asc, or, sql, count, isNull, isNotNull, gt, gte, lt, lte, inArray, ne } from "drizzle-orm";
+import { eq, and, desc, asc, or, sql, count, isNull, isNotNull, gt, gte, lt, lte, inArray, ne, not } from "drizzle-orm";
 import { filterGroupChatsFromConversations, isWhatsAppGroupChatId } from "./utils/whatsapp-group-filter";
 import { validatePhoneNumber as validatePhoneNumberUtil } from "./utils/phone-validation";
 
@@ -221,6 +227,18 @@ export interface CalendlyTokens {
   updatedAt?: Date;
 }
 
+
+export interface WhatsAppProxyConfig {
+  enabled: boolean;
+  type: 'http' | 'https' | 'socks5';
+  host: string;
+  port: number; // 1-65535
+  username: string | null;
+  password: string | null;
+  testStatus: 'untested' | 'working' | 'failed';
+  lastTested: Date | null;
+}
+
 export interface IStorage {
   getAllCompanies(): Promise<Company[]>;
   getCompany(id: number): Promise<Company | undefined>;
@@ -342,6 +360,8 @@ export interface IStorage {
   updateChannelConnection(id: number, updates: Partial<InsertChannelConnection>): Promise<ChannelConnection>;
   deleteChannelConnection(id: number): Promise<boolean>;
 
+  ensureInstagramChannelsActive(): Promise<number>;
+
   getSmtpConfig(companyId?: number): Promise<Record<string, unknown> | null>;
   saveSmtpConfig(config: Record<string, unknown>, companyId?: number): Promise<boolean>;
 
@@ -349,6 +369,17 @@ export interface IStorage {
   getAllCompanySettings(companyId: number): Promise<CompanySetting[]>;
   saveCompanySetting(companyId: number, key: string, value: unknown): Promise<CompanySetting>;
   deleteCompanySetting(companyId: number, key: string): Promise<boolean>;
+
+
+  getWhatsAppProxyConfig(companyId: number): Promise<WhatsAppProxyConfig | null>;
+  saveWhatsAppProxyConfig(companyId: number, config: WhatsAppProxyConfig): Promise<WhatsAppProxyConfig>;
+
+
+  getWhatsappProxyServers(companyId: number): Promise<any[]>;
+  getWhatsappProxyServer(id: number): Promise<any | null>;
+  createWhatsappProxyServer(data: any): Promise<any>;
+  updateWhatsappProxyServer(id: number, updates: any): Promise<any>;
+  deleteWhatsappProxyServer(id: number): Promise<boolean>;
 
   getGoogleTokens(userId: number, companyId: number): Promise<GoogleTokens | null>;
   saveGoogleTokens(userId: number, companyId: number, tokens: GoogleTokens): Promise<boolean>;
@@ -580,6 +611,7 @@ export interface IStorage {
   getContactTags(companyId: number): Promise<string[]>;
   getContactsForExport(options: {
     companyId: number;
+    exportScope?: 'all' | 'filtered';
     tags?: string[];
     createdAfter?: string;
     createdBefore?: string;
@@ -608,6 +640,21 @@ export interface IStorage {
   deleteContactTask(taskId: number, companyId: number): Promise<void>;
   bulkUpdateContactTasks(taskIds: number[], companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask[]>;
 
+
+  getCompanyTasks(companyId: number, options?: {
+    status?: string;
+    priority?: string;
+    assignedTo?: string;
+    contactId?: number;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<{ tasks: ContactTask[]; total: number }>;
+  getTask(taskId: number, companyId: number): Promise<ContactTask | undefined>;
+  createTask(task: InsertContactTask): Promise<ContactTask>;
+  updateTask(taskId: number, companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask>;
+  deleteTask(taskId: number, companyId: number): Promise<void>;
+  bulkUpdateTasks(taskIds: number[], companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask[]>;
 
   getContactActivity(contactId: number, options?: { type?: string; limit?: number }): Promise<any[]>;
 
@@ -737,7 +784,19 @@ export interface IStorage {
   sessionStore: session.Store;
 }
 
-import { db } from "./db";
+import { getDb } from "./db";
+
+
+
+const db = new Proxy({} as any, {
+  get(_target, prop) {
+    return (getDb() as any)[prop];
+  },
+  set(_target, prop, value) {
+    (getDb() as any)[prop] = value;
+    return true;
+  }
+});
 import connectPg from "connect-pg-simple";
 import { pool } from "./db";
 import { PgColumn } from "drizzle-orm/pg-core";
@@ -883,7 +942,7 @@ export class DatabaseStorage implements IStorage {
         .from(plans)
         .orderBy(plans.name);
 
-      return result.map(plan => ({
+      return result.map((plan: Plan) => ({
         ...plan,
         features: Array.isArray(plan.features) ? plan.features : [],
         campaignFeatures: Array.isArray(plan.campaignFeatures) ? plan.campaignFeatures : ["basic_campaigns"],
@@ -1072,7 +1131,7 @@ export class DatabaseStorage implements IStorage {
       let totalRequests = 0;
       const byProvider: Record<string, { tokens: number; cost: number; requests: number }> = {};
 
-      usageData.forEach(usage => {
+      usageData.forEach((usage: PlanAiUsageTracking) => {
         const tokens = usage.tokensUsedMonthly || 0;
         const cost = parseFloat(usage.costMonthly || '0');
         const requests = usage.requestsMonthly || 0;
@@ -1133,7 +1192,7 @@ export class DatabaseStorage implements IStorage {
       const byProvider: Record<string, { tokens: number; cost: number; requests: number; companies: number }> = {};
       const byCompany: Record<number, { tokens: number; cost: number; requests: number }> = {};
 
-      usageData.forEach(usage => {
+      usageData.forEach((usage: PlanAiUsageTracking) => {
         const tokens = usage.tokensUsedMonthly || 0;
         const cost = parseFloat(usage.costMonthly || '0');
         const requests = usage.requestsMonthly || 0;
@@ -1206,7 +1265,7 @@ export class DatabaseStorage implements IStorage {
       const companies = new Set<number>();
       const plans = new Set<number>();
 
-      usageData.forEach(usage => {
+      usageData.forEach((usage: PlanAiUsageTracking) => {
         const tokens = usage.tokensUsedMonthly || 0;
         const cost = parseFloat(usage.costMonthly || '0');
         const requests = usage.requestsMonthly || 0;
@@ -1396,6 +1455,123 @@ export class DatabaseStorage implements IStorage {
       return true;
     } catch (error) {
       console.error('Error saving Google Calendar credentials:', error);
+      return false;
+    }
+  }
+
+
+  async getWhatsAppProxyConfig(companyId: number): Promise<WhatsAppProxyConfig | null> {
+    try {
+      const setting = await this.getCompanySetting(companyId, 'whatsapp_proxy_config');
+      return (setting?.value as WhatsAppProxyConfig) || null;
+    } catch (error) {
+      console.error('Error getting WhatsApp proxy config:', { companyId, error });
+      return null;
+    }
+  }
+
+  async saveWhatsAppProxyConfig(companyId: number, config: WhatsAppProxyConfig): Promise<WhatsAppProxyConfig> {
+    try {
+      if (!companyId) throw new Error('companyId is required');
+      if (!config) throw new Error('config is required');
+      const saved = await this.saveCompanySetting(companyId, 'whatsapp_proxy_config', config);
+      return saved.value as WhatsAppProxyConfig;
+    } catch (error) {
+      console.error('Error saving WhatsApp proxy config:', { companyId, error });
+      throw error;
+    }
+  }
+
+  async getWhatsappProxyServers(companyId: number): Promise<any[]> {
+    try {
+      const servers = await db
+        .select()
+        .from(whatsappProxyServers)
+        .where(eq(whatsappProxyServers.companyId, companyId))
+        .orderBy(desc(whatsappProxyServers.createdAt));
+      return servers;
+    } catch (error) {
+      console.error('Error getting proxy servers:', error);
+      return [];
+    }
+  }
+
+  async getWhatsappProxyServer(id: number): Promise<any | null> {
+    try {
+      const [server] = await db
+        .select()
+        .from(whatsappProxyServers)
+        .where(eq(whatsappProxyServers.id, id));
+      return server || null;
+    } catch (error) {
+      console.error('Error getting proxy server:', error);
+      return null;
+    }
+  }
+
+  async createWhatsappProxyServer(data: any): Promise<any> {
+    try {
+      const [server] = await db
+        .insert(whatsappProxyServers)
+        .values({
+          companyId: data.companyId,
+          name: data.name,
+          enabled: data.enabled ?? true,
+          type: data.type,
+          host: data.host,
+          port: data.port,
+          username: data.username || null,
+          password: data.password || null,
+          testStatus: data.testStatus || 'untested',
+          lastTested: data.lastTested || null,
+          description: data.description || null
+        })
+        .returning();
+      return server;
+    } catch (error) {
+      console.error('Error creating proxy server:', error);
+      throw error;
+    }
+  }
+
+  async updateWhatsappProxyServer(id: number, updates: any): Promise<any> {
+    try {
+      const updateData: any = { updatedAt: new Date() };
+      if (updates.name !== undefined) updateData.name = updates.name;
+      if (updates.enabled !== undefined) updateData.enabled = updates.enabled;
+      if (updates.type !== undefined) updateData.type = updates.type;
+      if (updates.host !== undefined) updateData.host = updates.host;
+      if (updates.port !== undefined) updateData.port = updates.port;
+      if (updates.username !== undefined) updateData.username = updates.username || null;
+      if (updates.password !== undefined) updateData.password = updates.password || null;
+      if (updates.testStatus !== undefined) updateData.testStatus = updates.testStatus;
+      if (updates.lastTested !== undefined) updateData.lastTested = updates.lastTested;
+      if (updates.description !== undefined) updateData.description = updates.description || null;
+
+      const [server] = await db
+        .update(whatsappProxyServers)
+        .set(updateData)
+        .where(eq(whatsappProxyServers.id, id))
+        .returning();
+      
+      if (!server) {
+        throw new Error('Proxy server not found');
+      }
+      return server;
+    } catch (error) {
+      console.error('Error updating proxy server:', error);
+      throw error;
+    }
+  }
+
+  async deleteWhatsappProxyServer(id: number): Promise<boolean> {
+    try {
+      await db
+        .delete(whatsappProxyServers)
+        .where(eq(whatsappProxyServers.id, id));
+      return true;
+    } catch (error) {
+      console.error('Error deleting proxy server:', error);
       return false;
     }
   }
@@ -1727,18 +1903,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getChannelConnectionsByCompany(companyId: number): Promise<ChannelConnection[]> {
-
-
     const allConnections = await db.select().from(channelConnections);
-    console.log(`[Storage] DEBUG - All channel connections in database:`,
-      allConnections.map(c => ({ id: c.id, name: c.accountName, status: c.status, companyId: c.companyId, userId: c.userId })));
-
     let result = await db.select().from(channelConnections).where(eq(channelConnections.companyId, companyId));
-    console.log(`[Storage] Found ${result.length} connections with companyId=${companyId}:`,
-      result.map(c => ({ id: c.id, name: c.accountName, status: c.status, companyId: c.companyId })));
 
     const companyUsers = await db.select().from(users).where(eq(users.companyId, companyId));
-    const userIds = companyUsers.map(u => u.id);
+    const userIds = companyUsers.map((u: User) => u.id);
 
 
     if (userIds.length > 0) {
@@ -1757,7 +1926,7 @@ export class DatabaseStorage implements IStorage {
             .where(eq(channelConnections.id, connection.id));
         }
 
-        result = [...result, ...legacyConnections.map(conn => ({ ...conn, companyId }))];
+        result = [...result, ...legacyConnections.map((conn: ChannelConnection) => ({ ...conn, companyId }))];
       }
     }
 
@@ -1806,6 +1975,24 @@ export class DatabaseStorage implements IStorage {
     return result.rowCount || 0;
   }
 
+  /**
+   * Ensure all existing Instagram channels are marked as active
+   * This method is used to update existing Instagram channels that might be inactive
+   */
+  async ensureInstagramChannelsActive(): Promise<number> {
+    const result = await db.update(channelConnections)
+      .set({ status: 'active', updatedAt: new Date() })
+      .where(
+        and(
+          eq(channelConnections.channelType, 'instagram'),
+
+          not(inArray(channelConnections.status, ['error', 'disabled']))
+        )
+      );
+
+    return result.rowCount || 0;
+  }
+
   async updateChannelConnectionName(id: number, accountName: string): Promise<ChannelConnection> {
     const [updatedConnection] = await db
       .update(channelConnections)
@@ -1839,8 +2026,10 @@ export class DatabaseStorage implements IStorage {
 
 
 
-  async getContacts(options?: { page?: number; limit?: number; search?: string; channel?: string; tags?: string[]; companyId?: number; includeArchived?: boolean }): Promise<{ contacts: Contact[]; total: number }> {
+  async getContacts(options?: { page?: number; limit?: number; search?: string; channel?: string; tags?: string[]; companyId?: number; includeArchived?: boolean; archivedOnly?: boolean; dateRange?: string }): Promise<{ contacts: Contact[]; total: number }> {
     try {
+
+
       const page = options?.page || 1;
       const limit = options?.limit || 10;
       const offset = (page - 1) * limit;
@@ -1850,7 +2039,65 @@ export class DatabaseStorage implements IStorage {
       const companyCondition = options?.companyId ? eq(contacts.companyId, options.companyId) : undefined;
 
 
-      const archiveCondition = options?.includeArchived ? undefined : eq(contacts.isArchived, false);
+      let archiveCondition = undefined;
+      if (options?.archivedOnly) {
+
+        archiveCondition = eq(contacts.isArchived, true);
+      } else if (!options?.includeArchived) {
+
+        archiveCondition = eq(contacts.isArchived, false);
+      }
+
+
+
+      let dateRangeCondition = undefined;
+      if (options?.dateRange && options.dateRange !== 'all') {
+        const now = new Date();
+        let startDate: Date | undefined;
+
+        switch (options.dateRange) {
+          case 'today':
+            startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            break;
+          case 'yesterday':
+            startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+            const endOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            dateRangeCondition = and(
+              gte(contacts.createdAt, startDate),
+              lte(contacts.createdAt, endOfYesterday)
+            );
+            break;
+          case 'last7days':
+            startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            break;
+          case 'last30days':
+            startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            break;
+          case 'last90days':
+            startDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+            break;
+          case 'thismonth':
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+            break;
+          case 'lastmonth':
+            const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
+            dateRangeCondition = and(
+              gte(contacts.createdAt, lastMonth),
+              lte(contacts.createdAt, endOfLastMonth)
+            );
+            break;
+        }
+
+
+        if (startDate && !dateRangeCondition) {
+          dateRangeCondition = gte(contacts.createdAt, startDate);
+        }
+
+        if (dateRangeCondition) {
+
+        }
+      }
 
       const phoneNumberFilter = and(
         or(
@@ -1908,22 +2155,131 @@ export class DatabaseStorage implements IStorage {
 
 
         const conditions = [];
-        if (companyCondition) conditions.push(companyCondition);
-        if (archiveCondition) conditions.push(archiveCondition);
-        if (phoneNumberFilter) conditions.push(phoneNumberFilter);
-        if (searchCondition) conditions.push(searchCondition);
-        if (options?.channel) conditions.push(eq(contacts.identifierType, options.channel));
-        if (tagCondition) conditions.push(tagCondition);
+        if (companyCondition) {
+
+          conditions.push(companyCondition);
+        }
+        if (archiveCondition) {
+
+          conditions.push(archiveCondition);
+        }
+        if (phoneNumberFilter) {
+
+          conditions.push(phoneNumberFilter);
+        }
+        if (searchCondition) {
+
+          conditions.push(searchCondition);
+        }
+        if (options?.channel) {
+
+
+          if (options.channel === 'whatsapp_official' || options.channel === 'whatsapp_unofficial') {
+
+
+
+            if (options.channel === 'whatsapp_official') {
+
+              conditions.push(
+                or(
+                  eq(contacts.identifierType, 'whatsapp_official'),
+                  and(
+                    eq(contacts.identifierType, 'whatsapp'),
+                    eq(contacts.source, 'whatsapp_official')
+                  )
+                )
+              );
+            } else if (options.channel === 'whatsapp_unofficial') {
+
+              conditions.push(
+                or(
+                  eq(contacts.identifierType, 'whatsapp_unofficial'),
+                  and(
+                    eq(contacts.identifierType, 'whatsapp'),
+                    or(
+                      eq(contacts.source, 'whatsapp'),
+                      isNull(contacts.source)
+                    )
+                  )
+                )
+              );
+            }
+          } else {
+
+            conditions.push(eq(contacts.identifierType, options.channel));
+          }
+        }
+        if (tagCondition) {
+
+          conditions.push(tagCondition);
+        }
+        if (dateRangeCondition) {
+
+          conditions.push(dateRangeCondition);
+        }
 
         whereConditions = conditions.length > 0 ? and(...conditions) : undefined;
       } else {
 
         const conditions = [];
-        if (companyCondition) conditions.push(companyCondition);
-        if (archiveCondition) conditions.push(archiveCondition);
-        if (phoneNumberFilter) conditions.push(phoneNumberFilter);
-        if (options?.channel) conditions.push(eq(contacts.identifierType, options.channel));
-        if (tagCondition) conditions.push(tagCondition);
+        if (companyCondition) {
+
+          conditions.push(companyCondition);
+        }
+        if (archiveCondition) {
+
+          conditions.push(archiveCondition);
+        }
+        if (phoneNumberFilter) {
+
+          conditions.push(phoneNumberFilter);
+        }
+        if (options?.channel) {
+
+
+          if (options.channel === 'whatsapp_official' || options.channel === 'whatsapp_unofficial') {
+
+
+
+            if (options.channel === 'whatsapp_official') {
+
+              conditions.push(
+                or(
+                  eq(contacts.identifierType, 'whatsapp_official'),
+                  and(
+                    eq(contacts.identifierType, 'whatsapp'),
+                    eq(contacts.source, 'whatsapp_official')
+                  )
+                )
+              );
+            } else if (options.channel === 'whatsapp_unofficial') {
+
+              conditions.push(
+                or(
+                  eq(contacts.identifierType, 'whatsapp_unofficial'),
+                  and(
+                    eq(contacts.identifierType, 'whatsapp'),
+                    or(
+                      eq(contacts.source, 'whatsapp'),
+                      isNull(contacts.source)
+                    )
+                  )
+                )
+              );
+            }
+          } else {
+
+            conditions.push(eq(contacts.identifierType, options.channel));
+          }
+        }
+        if (tagCondition) {
+
+          conditions.push(tagCondition);
+        }
+        if (dateRangeCondition) {
+
+          conditions.push(dateRangeCondition);
+        }
 
         whereConditions = conditions.length > 0 ? and(...conditions) : undefined;
       }
@@ -1944,6 +2300,7 @@ export class DatabaseStorage implements IStorage {
 
       let contactsList: Contact[] = [];
       if (whereConditions) {
+
         contactsList = await db
           .select()
           .from(contacts)
@@ -1952,6 +2309,7 @@ export class DatabaseStorage implements IStorage {
           .limit(limit)
           .offset(offset);
       } else {
+
         contactsList = await db
           .select()
           .from(contacts)
@@ -1960,12 +2318,14 @@ export class DatabaseStorage implements IStorage {
           .offset(offset);
       }
 
+    
+
       return {
         contacts: contactsList,
         total: totalCount
       };
     } catch (error) {
-      console.error('Error getting contacts:', error);
+      console.error('[Storage] Error getting contacts:', error);
       return { contacts: [], total: 0 };
     }
   }
@@ -2007,7 +2367,7 @@ export class DatabaseStorage implements IStorage {
           .from(messages)
           .where(eq(messages.conversationId, conversation.id));
 
-        messagesWithMedia.forEach(msg => {
+        messagesWithMedia.forEach((msg: { id: number; mediaUrl: string | null; metadata: unknown }) => {
           if (msg.mediaUrl) {
             mediaFiles.push(msg.mediaUrl);
           }
@@ -2028,7 +2388,7 @@ export class DatabaseStorage implements IStorage {
         });
       }
 
-      await db.transaction(async (tx) => {
+      await db.transaction(async (tx: any) => {
         for (const conversation of conversationList) {
           await tx.delete(messages).where(eq(messages.conversationId, conversation.id));
         }
@@ -2310,8 +2670,20 @@ export class DatabaseStorage implements IStorage {
 
           or(
             isNull(contacts.phone),
-            sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
-            sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+
+            eq(conversations.channelType, 'instagram'),
+            eq(conversations.channelType, 'messenger'),
+            eq(conversations.channelType, 'facebook'),
+
+            and(
+              ne(conversations.channelType, 'instagram'),
+              ne(conversations.channelType, 'messenger'),
+              ne(conversations.channelType, 'facebook'),
+              or(
+                sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
+                sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+              )
+            )
           )
         )
       );
@@ -2356,8 +2728,20 @@ export class DatabaseStorage implements IStorage {
 
             or(
               isNull(contacts.phone),
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+
+              eq(conversations.channelType, 'instagram'),
+              eq(conversations.channelType, 'messenger'),
+              eq(conversations.channelType, 'facebook'),
+
+              and(
+                ne(conversations.channelType, 'instagram'),
+                ne(conversations.channelType, 'messenger'),
+                ne(conversations.channelType, 'facebook'),
+                or(
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+                )
+              )
             )
           )
         )
@@ -2712,7 +3096,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
-      .orderBy(messages.sentAt, messages.createdAt);
+      .orderBy(messages.sentAt, messages.createdAt, messages.id);
   }
 
   async getMessagesByConversationPaginated(conversationId: number, limit: number, offset: number): Promise<Message[]> {
@@ -2720,7 +3104,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
-      .orderBy(desc(messages.sentAt), desc(messages.createdAt))
+      .orderBy(desc(messages.sentAt), desc(messages.createdAt), desc(messages.id))
       .limit(limit)
       .offset(offset);
   }
@@ -2745,8 +3129,8 @@ export class DatabaseStorage implements IStorage {
           eq(conversations.companyId, companyId)
         )
       )
-      .orderBy(messages.sentAt, messages.createdAt)
-      .then(results => results.map(result => result.messages));
+      .orderBy(messages.sentAt, messages.createdAt, messages.id)
+      .then((results: Array<{ messages: Message; conversations: Conversation }>) => results.map((result: { messages: Message; conversations: Conversation }) => result.messages));
   }
 
   async getMessagesByConversationPaginatedWithCompanyValidation(conversationId: number, companyId: number, limit: number, offset: number): Promise<Message[]> {
@@ -2760,10 +3144,10 @@ export class DatabaseStorage implements IStorage {
           eq(conversations.companyId, companyId)
         )
       )
-      .orderBy(desc(messages.sentAt), desc(messages.createdAt))
+      .orderBy(desc(messages.sentAt), desc(messages.createdAt), desc(messages.id))
       .limit(limit)
       .offset(offset)
-      .then(results => results.map(result => result.messages));
+      .then((results: Array<{ messages: Message; conversations: Conversation }>) => results.map((result: { messages: Message; conversations: Conversation }) => result.messages));
   }
 
   async getMessagesCountByConversationWithCompanyValidation(conversationId: number, companyId: number): Promise<number> {
@@ -2860,7 +3244,7 @@ export class DatabaseStorage implements IStorage {
 
   async deleteConversation(id: number): Promise<boolean> {
     try {
-      await db.transaction(async (tx) => {
+      await db.transaction(async (tx: any) => {
 
         await tx.delete(messages).where(eq(messages.conversationId, id));
 
@@ -2982,7 +3366,7 @@ export class DatabaseStorage implements IStorage {
     paymentTransactionId: number
   ): Promise<boolean> {
     try {
-      return await db.transaction(async (tx) => {
+      return await db.transaction(async (tx: any) => {
 
         const [balance] = await tx
           .select()
@@ -3046,7 +3430,7 @@ export class DatabaseStorage implements IStorage {
         .where(eq(messages.conversationId, conversationId));
 
       const mediaFiles: string[] = [];
-      messagesWithMedia.forEach(msg => {
+      messagesWithMedia.forEach((msg: { id: number; mediaUrl: string | null; metadata: unknown }) => {
         if (msg.mediaUrl) {
           mediaFiles.push(msg.mediaUrl);
         }
@@ -3163,7 +3547,7 @@ export class DatabaseStorage implements IStorage {
         )
       );
 
-    return results.map(result => ({
+    return results.map((result: { conversationId: number; unreadCount: number | null }) => ({
       ...result,
       unreadCount: result.unreadCount ?? 0
     }));
@@ -3321,9 +3705,20 @@ export class DatabaseStorage implements IStorage {
       throw new Error(`Channel with id ${assignment.channelId} not found`);
     }
 
+
     const existingAssignments = await this.getFlowAssignments(assignment.channelId, assignment.flowId);
     if (existingAssignments.length > 0) {
       throw new Error(`A flow assignment already exists for this channel and flow combination`);
+    }
+
+
+    const existingFlowAssignments = await this.getFlowAssignments(undefined, assignment.flowId);
+    if (existingFlowAssignments.length > 0) {
+      const existingChannel = await this.getChannelConnection(existingFlowAssignments[0].channelId);
+      const existingChannelName = existingChannel ?
+        `${existingChannel.accountName} (${existingChannel.channelType})` :
+        `Channel ID ${existingFlowAssignments[0].channelId}`;
+      throw new Error(`This flow is already assigned to ${existingChannelName}. A flow can only be assigned to one channel at a time.`);
     }
 
     const [newAssignment] = await db
@@ -3341,6 +3736,7 @@ export class DatabaseStorage implements IStorage {
     }
 
     if (isActive) {
+
       const otherActiveAssignments = await db
         .select()
         .from(flowAssignments)
@@ -3353,11 +3749,32 @@ export class DatabaseStorage implements IStorage {
 
       for (const otherAssignment of otherActiveAssignments) {
         if (otherAssignment.id !== id) {
+
           await db
             .update(flowAssignments)
             .set({ isActive: false, updatedAt: new Date() })
             .where(eq(flowAssignments.id, otherAssignment.id));
         }
+      }
+
+
+      const flowActiveOnOtherChannels = await db
+        .select()
+        .from(flowAssignments)
+        .where(
+          and(
+            eq(flowAssignments.flowId, assignment.flowId),
+            eq(flowAssignments.isActive, true),
+            ne(flowAssignments.channelId, assignment.channelId)
+          )
+        );
+
+      if (flowActiveOnOtherChannels.length > 0) {
+        const otherChannel = await this.getChannelConnection(flowActiveOnOtherChannels[0].channelId);
+        const otherChannelName = otherChannel ?
+          `${otherChannel.accountName} (${otherChannel.channelType})` :
+          `Channel ID ${flowActiveOnOtherChannels[0].channelId}`;
+        throw new Error(`This flow is already active on ${otherChannelName}. A flow can only be active on one channel at a time.`);
       }
     }
 
@@ -3394,7 +3811,11 @@ export class DatabaseStorage implements IStorage {
 
   async getActiveTeamMembers(): Promise<User[]> {
     try {
-      return await db.select().from(users);
+      return await db
+        .select()
+        .from(users)
+        .where(eq(users.active, true))
+        .orderBy(users.fullName);
     } catch (error) {
       console.error('Error getting active team members:', error);
       return [];
@@ -3419,7 +3840,12 @@ export class DatabaseStorage implements IStorage {
       return await db
         .select()
         .from(users)
-        .where(eq(users.companyId, companyId))
+        .where(
+          and(
+            eq(users.companyId, companyId),
+            eq(users.active, true)
+          )
+        )
         .orderBy(users.fullName);
     } catch (error) {
       console.error(`Error getting active team members for company ${companyId}:`, error);
@@ -3569,8 +3995,20 @@ export class DatabaseStorage implements IStorage {
             ne(conversations.channelType, 'email'),
             or(
               isNull(contacts.phone),
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+
+              eq(conversations.channelType, 'instagram'),
+              eq(conversations.channelType, 'messenger'),
+              eq(conversations.channelType, 'facebook'),
+
+              and(
+                ne(conversations.channelType, 'instagram'),
+                ne(conversations.channelType, 'messenger'),
+                ne(conversations.channelType, 'facebook'),
+                or(
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+                )
+              )
             )
           )
         );
@@ -3599,8 +4037,20 @@ export class DatabaseStorage implements IStorage {
             ne(conversations.channelType, 'email'),
             or(
               isNull(contacts.phone),
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+
+              eq(conversations.channelType, 'instagram'),
+              eq(conversations.channelType, 'messenger'),
+              eq(conversations.channelType, 'facebook'),
+
+              and(
+                ne(conversations.channelType, 'instagram'),
+                ne(conversations.channelType, 'messenger'),
+                ne(conversations.channelType, 'facebook'),
+                or(
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+                )
+              )
             )
           )
         );
@@ -3656,8 +4106,20 @@ export class DatabaseStorage implements IStorage {
             ne(conversations.channelType, 'email'),
             or(
               isNull(contacts.phone),
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
-              sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+
+              eq(conversations.channelType, 'instagram'),
+              eq(conversations.channelType, 'messenger'),
+              eq(conversations.channelType, 'facebook'),
+
+              and(
+                ne(conversations.channelType, 'instagram'),
+                ne(conversations.channelType, 'messenger'),
+                ne(conversations.channelType, 'facebook'),
+                or(
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`,
+                  sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.identifier}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
+                )
+              )
             )
           )
         );
@@ -3741,7 +4203,7 @@ export class DatabaseStorage implements IStorage {
         });
       }
 
-      result.forEach((row) => {
+      result.forEach((row: { date: unknown; channelType: string | null; count: unknown }) => {
         if (row.date) {
           const date = new Date(String(row.date)).toISOString().split('T')[0];
           const channelType = String(row.channelType);
@@ -3802,7 +4264,7 @@ export class DatabaseStorage implements IStorage {
         });
       }
 
-      result.forEach((row) => {
+      result.forEach((row: { date: unknown; channelType: string | null; count: unknown }) => {
         if (row.date) {
           const date = new Date(String(row.date)).toISOString().split('T')[0];
           const channelType = String(row.channelType);
@@ -3861,7 +4323,7 @@ export class DatabaseStorage implements IStorage {
       }
 
 
-      result.forEach((row) => {
+      result.forEach((row: { date: unknown; channelType: string | null; count: unknown }) => {
         if (row.date) {
           const date = new Date(String(row.date)).toISOString().split('T')[0];
           const channelType = String(row.channelType);
@@ -3894,7 +4356,7 @@ export class DatabaseStorage implements IStorage {
         .innerJoin(conversations, eq(messages.conversationId, conversations.id))
         .groupBy(conversations.channelType);
 
-      return result.map(row => ({
+      return result.map((row: { channelType: string | null; count: unknown }) => ({
         name: String(row.channelType),
         value: parseInt(String(row.count))
       }));
@@ -3916,7 +4378,7 @@ export class DatabaseStorage implements IStorage {
         .where(eq(conversations.companyId, companyId))
         .groupBy(conversations.channelType);
 
-      return result.map(row => ({
+      return result.map((row: { channelType: string | null; count: unknown }) => ({
         name: String(row.channelType),
         value: parseInt(String(row.count))
       }));
@@ -4433,7 +4895,7 @@ export class DatabaseStorage implements IStorage {
 
       const results = await query;
 
-      return results.map(row => {
+      return results.map((row: { nodeId: string | null; nodeType: string | null; dropoffCount: unknown; totalCount: unknown }) => {
         const dropoffCount = Number(row.dropoffCount);
         const totalCount = Number(row.totalCount);
         const dropoffRate = totalCount > 0 ? Math.round((dropoffCount / totalCount) * 100) : 0;
@@ -4547,7 +5009,7 @@ export class DatabaseStorage implements IStorage {
         .from(paymentTransactions)
         .orderBy(desc(paymentTransactions.createdAt));
 
-      return result.map(transaction => ({
+      return result.map((transaction: any) => ({
         ...transaction,
         amount: Number(transaction.amount),
         metadata: transaction.metadata as Record<string, unknown> | undefined
@@ -4566,7 +5028,7 @@ export class DatabaseStorage implements IStorage {
         .where(eq(paymentTransactions.companyId, companyId))
         .orderBy(desc(paymentTransactions.createdAt));
 
-      return result.map(transaction => this.mapToPaymentTransaction(transaction));
+      return result.map((transaction: any) => this.mapToPaymentTransaction(transaction));
     } catch (error) {
       console.error(`Error getting payment transactions for company ${companyId}:`, error);
       return [];
@@ -5173,7 +5635,7 @@ export class DatabaseStorage implements IStorage {
         .where(eq(translations.languageId, language.id))
         .orderBy(translationNamespaces.name, translationKeys.key);
 
-      return result.map(row => ({
+      return result.map((row: { namespaceName: string; key: string; value: string }) => ({
         key: `${row.namespaceName}.${row.key}`,
         value: row.value
       }));
@@ -5515,9 +5977,9 @@ async getDealTags(companyId: number): Promise<string[]> {
 
 
     const allTags = new Set<string>();
-    result.forEach(row => {
+    result.forEach((row: { tags: string[] | null }) => {
       if (row.tags && Array.isArray(row.tags)) {
-        row.tags.forEach(tag => {
+        row.tags.forEach((tag: string) => {
           if (tag && tag.trim()) {
             allTags.add(tag.trim());
           }
@@ -5547,9 +6009,9 @@ async getContactTags(companyId: number): Promise<string[]> {
       );
 
     const allTags = new Set<string>();
-    result.forEach(row => {
+    result.forEach((row: { tags: string[] | null }) => {
       if (row.tags && Array.isArray(row.tags)) {
-        row.tags.forEach(tag => {
+        row.tags.forEach((tag: string) => {
           if (tag && tag.trim()) {
             allTags.add(tag.trim());
           }
@@ -5566,6 +6028,7 @@ async getContactTags(companyId: number): Promise<string[]> {
 
 async getContactsForExport(options: {
   companyId: number;
+  exportScope?: 'all' | 'filtered';
   tags?: string[];
   createdAfter?: string;
   createdBefore?: string;
@@ -5579,15 +6042,12 @@ async getContactsForExport(options: {
     ];
 
 
-    const phoneNumberFilter = and(
-      or(
-        isNull(contacts.phone),
-        and(
-          sql`${contacts.phone} NOT LIKE 'LID-%'`,
-          sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 7`,
-          sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) <= 13`,
-          sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
-        )
+
+    const phoneNumberFilter = or(
+      isNull(contacts.phone),
+      and(
+        sql`${contacts.phone} NOT LIKE 'LID-%'`,
+        sql`NOT (LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) >= 15 AND REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g') ~ '^120[0-9]+$')`
       )
     );
 
@@ -5596,41 +6056,42 @@ async getContactsForExport(options: {
     }
 
 
-    if (options.tags && options.tags.length > 0) {
-      const tagConditions = options.tags.map(tag =>
-        sql`${contacts.tags} @> ARRAY[${tag}]::text[]`
-      );
-      const tagCondition = or(...tagConditions);
-      if (tagCondition) {
-        whereConditions.push(tagCondition);
+    const shouldApplyFilters = options.exportScope === 'filtered';
+
+    if (shouldApplyFilters) {
+      if (options.tags && options.tags.length > 0) {
+        const tagConditions = options.tags.map(tag =>
+          sql`${contacts.tags} @> ARRAY[${tag}]::text[]`
+        );
+        const tagCondition = or(...tagConditions);
+        if (tagCondition) {
+          whereConditions.push(tagCondition);
+        }
       }
-    }
 
-
-    if (options.createdAfter) {
-      whereConditions.push(gte(contacts.createdAt, new Date(options.createdAfter)));
-    }
-
-    if (options.createdBefore) {
-      whereConditions.push(lte(contacts.createdAt, new Date(options.createdBefore)));
-    }
-
-
-    if (options.search) {
-      const searchTerm = `%${options.search}%`;
-      const searchCondition = or(
-        sql`${contacts.name} ILIKE ${searchTerm}`,
-        sql`${contacts.email} ILIKE ${searchTerm}`,
-        sql`${contacts.phone} ILIKE ${searchTerm}`
-      );
-      if (searchCondition) {
-        whereConditions.push(searchCondition);
+      if (options.createdAfter) {
+        whereConditions.push(gte(contacts.createdAt, new Date(options.createdAfter)));
       }
-    }
 
+      if (options.createdBefore) {
+        whereConditions.push(lte(contacts.createdAt, new Date(options.createdBefore)));
+      }
 
-    if (options.channel) {
-      whereConditions.push(eq(contacts.identifierType, options.channel));
+      if (options.search) {
+        const searchTerm = `%${options.search}%`;
+        const searchCondition = or(
+          sql`${contacts.name} ILIKE ${searchTerm}`,
+          sql`${contacts.email} ILIKE ${searchTerm}`,
+          sql`${contacts.phone} ILIKE ${searchTerm}`
+        );
+        if (searchCondition) {
+          whereConditions.push(searchCondition);
+        }
+      }
+
+      if (options.channel && options.channel !== 'all' && options.channel !== '') {
+        whereConditions.push(eq(contacts.identifierType, options.channel));
+      }
     }
 
     const contactsList = await db
@@ -5655,16 +6116,22 @@ async getContactsWithoutConversations(companyId: number, options?: {
   limit?: number;
   offset?: number;
 }): Promise<{ contacts: Contact[]; total: number }> {
+  let searchTerm = options?.search?.trim();
+
+
+  const queryTimeout = 30000; // 30 seconds timeout
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Query timeout')), queryTimeout);
+  });
+
   try {
-    const limit = options?.limit || 50;
-    const offset = options?.offset || 0;
+    const limit = Math.min(options?.limit || 50, 100); // Cap limit to prevent large queries
+    const offset = Math.max(options?.offset || 0, 0); // Ensure non-negative offset
 
     let whereConditions = [
       eq(contacts.companyId, companyId),
       eq(contacts.isActive, true),
-
       isNotNull(contacts.identifierType),
-
       ne(contacts.identifierType, 'email')
     ];
 
@@ -5686,17 +6153,35 @@ async getContactsWithoutConversations(companyId: number, options?: {
     }
 
 
-    if (options?.search && options.search.trim()) {
-      const searchTerm = `%${options.search.trim()}%`;
 
-      const searchCondition = or(
-        sql`${contacts.name} ILIKE ${searchTerm}`,
-        sql`${contacts.email} ILIKE ${searchTerm}`,
-        sql`${contacts.phone} ILIKE ${searchTerm}`
-      );
+    if (searchTerm && searchTerm.length > 0) {
 
-      if (searchCondition) {
-        whereConditions.push(searchCondition);
+      if (searchTerm.length > 100) {
+        searchTerm = searchTerm.substring(0, 100);
+      }
+
+
+      const escapedSearchTerm = searchTerm.replace(/[%_\\]/g, '\\$&');
+      const searchPattern = `%${escapedSearchTerm}%`;
+
+      try {
+
+        const searchCondition = or(
+
+          sql`${contacts.name} ILIKE ${searchPattern}`,
+
+          sql`${contacts.email} ILIKE ${searchPattern}`,
+          sql`${contacts.phone} LIKE ${searchPattern}`,
+          sql`${contacts.company} ILIKE ${searchPattern}`,
+
+          sql`${contacts.identifier} LIKE ${searchPattern}`
+        );
+
+        if (searchCondition) {
+          whereConditions.push(searchCondition);
+        }
+      } catch (searchError) {
+
       }
     }
 
@@ -5734,29 +6219,41 @@ async getContactsWithoutConversations(companyId: number, options?: {
       .limit(limit)
       .offset(offset);
 
-    const contactsList = await contactsWithoutConversationsQuery;
+
+    const contactsList = await Promise.race([
+      contactsWithoutConversationsQuery,
+      timeoutPromise
+    ]) as Contact[];
 
 
-    const totalQuery = db
-      .select({ count: sql`COUNT(*)::int` })
-      .from(contacts)
-      .leftJoin(conversations, eq(conversations.contactId, contacts.id))
-      .where(
-        and(
-          ...whereConditions,
-          isNull(conversations.id)
-        )
-      );
+    let total = 0;
+    try {
+      const totalQuery = db
+        .select({ count: sql`COUNT(*)::int` })
+        .from(contacts)
+        .leftJoin(conversations, eq(conversations.contactId, contacts.id))
+        .where(
+          and(
+            ...whereConditions,
+            isNull(conversations.id)
+          )
+        );
 
-    const totalResult = await totalQuery;
-    const total = Number(totalResult[0]?.count || 0);
+      const totalResult = await Promise.race([
+        totalQuery,
+        timeoutPromise
+      ]) as any[];
+      total = Number(totalResult[0]?.count || 0);
+    } catch (totalError) {
+      total = contactsList.length; // Fallback to result length
+    }
 
     return {
       contacts: contactsList,
       total
     };
-  } catch (error) {
-    console.error('Error getting contacts without conversations:', error);
+  } catch (error: any) {
+
     return { contacts: [], total: 0 };
   }
 }
@@ -6128,7 +6625,7 @@ async updatePipelineStage(id: number, updates: Partial<InsertPipelineStage>): Pr
 
 async deletePipelineStage(id: number, moveDealsToStageId?: number): Promise<boolean> {
   try {
-    return await db.transaction(async (tx) => {
+    return await db.transaction(async (tx: any) => {
       if (moveDealsToStageId) {
         await tx
           .update(deals)
@@ -6165,7 +6662,7 @@ async deletePipelineStage(id: number, moveDealsToStageId?: number): Promise<bool
 
 async reorderPipelineStages(stageIds: number[]): Promise<boolean> {
   try {
-    return await db.transaction(async (tx) => {
+    return await db.transaction(async (tx: any) => {
       for (let i = 0; i < stageIds.length; i++) {
         await tx
           .update(pipelineStages)
@@ -6241,7 +6738,7 @@ async getDeals(filter?: {
       .where(and(...conditions))
       .orderBy(desc(deals.lastActivityAt));
 
-    return result.map(({ contactName, contactPhone, ...deal }) => deal);
+    return result.map(({ contactName, contactPhone, ...deal }: { contactName: string | null; contactPhone: string | null; [key: string]: any }) => deal);
   } catch (error) {
     console.error('Error getting deals with filter:', error);
     return [];
@@ -6268,7 +6765,7 @@ async getDealsByStageId(stageId: number): Promise<Deal[]> {
 
 async updateDealStageId(id: number, stageId: number): Promise<Deal> {
   try {
-    return await db.transaction(async (tx) => {
+    return await db.transaction(async (tx: any) => {
       const [pipelineStage] = await tx
         .select()
         .from(pipelineStages)
@@ -6360,7 +6857,7 @@ async updateDealStageId(id: number, stageId: number): Promise<Deal> {
 
       const results = await query;
 
-      return results.map(rp => ({
+      return results.map((rp: RolePermission) => ({
         ...rp,
         permissions: rp.permissions as Record<string, boolean>
       }));
@@ -6476,7 +6973,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .where(sql`${paymentTransactions.createdAt} >= ${startDate}`)
         .orderBy(desc(paymentTransactions.createdAt));
 
-      return result.map(transaction => this.mapToPaymentTransaction(transaction));
+      return result.map((transaction: any) => this.mapToPaymentTransaction(transaction));
     } catch (error) {
       console.error("Error getting payment transactions since date:", error);
       return [];
@@ -6527,7 +7024,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .limit(limit)
         .orderBy(desc(companies.createdAt));
 
-      const enhancedCompanies = await Promise.all(result.map(async (company) => {
+      const enhancedCompanies = await Promise.all(result.map(async (company: Company) => {
         const [lastPayment] = await db
           .select()
           .from(paymentTransactions)
@@ -6628,7 +7125,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .limit(Number(limit) || 10);
 
       return {
-        data: data.map(transaction => this.mapToPaymentTransaction(transaction)),
+        data: data.map((transaction: any) => this.mapToPaymentTransaction(transaction)),
         total: Number(count)
       };
     } catch (error) {
@@ -6653,7 +7150,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .limit(limit);
 
       return {
-        data: data.map(transaction => this.mapToPaymentTransaction(transaction)),
+        data: data.map((transaction: any) => this.mapToPaymentTransaction(transaction)),
         total: Number(count)
       };
     } catch (error) {
@@ -6733,7 +7230,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
       const result = await query;
 
-      return result.map(row => ({
+      return result.map((row: { paymentMethod: string; totalTransactions: unknown; successfulTransactions: unknown; totalRevenue: unknown; averageAmount: unknown }) => ({
         paymentMethod: row.paymentMethod,
         totalTransactions: Number(row.totalTransactions),
         successfulTransactions: Number(row.successfulTransactions),
@@ -6781,7 +7278,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
       const result = await query.orderBy(desc(paymentTransactions.createdAt));
 
-      return result.map(transaction => this.mapToPaymentTransaction(transaction));
+      return result.map((transaction: any) => this.mapToPaymentTransaction(transaction));
     } catch (error) {
       console.error("Error getting payment transactions for export:", error);
       return [];
@@ -7762,8 +8259,8 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
 
       const contactIds = basicConversations
-        .map(conv => conv.contactId)
-        .filter(id => id !== null);
+        .map((conv: Conversation) => conv.contactId)
+        .filter((id: number | null): id is number => id !== null);
 
       let contactsMap = new Map();
       if (contactIds.length > 0) {
@@ -7772,13 +8269,13 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
           .from(contacts)
           .where(inArray(contacts.id, contactIds));
 
-        contactsList.forEach(contact => {
+        contactsList.forEach((contact: Contact) => {
           contactsMap.set(contact.id, contact);
         });
       }
 
 
-      const conversationsWithContacts = basicConversations.map(conv => ({
+      const conversationsWithContacts = basicConversations.map((conv: Conversation) => ({
         ...conv,
         contact: conv.contactId ? contactsMap.get(conv.contactId) || null : null
       }));
@@ -8350,7 +8847,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
       const totalPages = Math.ceil(Number(count) / limit);
 
       return {
-        data: data.map(row => ({
+        data: data.map((row: { referral: any; affiliateName: string | null; affiliateCode: string | null }) => ({
           ...row.referral,
           affiliateName: row.affiliateName,
           affiliateCode: row.affiliateCode
@@ -8441,7 +8938,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
       const totalPages = Math.ceil(Number(count) / limit);
 
       return {
-        data: data.map(row => ({
+        data: data.map((row: { payout: any; affiliateName: string | null; affiliateCode: string | null }) => ({
           ...row.payout,
           affiliateName: row.affiliateName,
           affiliateCode: row.affiliateCode
@@ -8929,7 +9426,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .from(contacts)
         .where(eq(contacts.companyId, companyId));
 
-      const contactIds = companyContacts.map(c => c.id);
+      const contactIds = companyContacts.map((c: { id: number }) => c.id);
 
       if (contactIds.length === 0) {
         return { success: true, deletedCount: 0 };
@@ -8938,14 +9435,14 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
       let totalDeleted = 0;
 
 
-      await db.transaction(async (tx) => {
+      await db.transaction(async (tx: any) => {
 
         const conversationList = await tx
           .select({ id: conversations.id })
           .from(conversations)
           .where(inArray(conversations.contactId, contactIds));
 
-        const conversationIds = conversationList.map(c => c.id);
+        const conversationIds = conversationList.map((c: { id: number }) => c.id);
 
         if (conversationIds.length > 0) {
 
@@ -8980,7 +9477,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .from(conversations)
         .where(eq(conversations.companyId, companyId));
 
-      const conversationIds = companyConversations.map(c => c.id);
+      const conversationIds = companyConversations.map((c: { id: number }) => c.id);
 
       if (conversationIds.length === 0) {
         return { success: true, deletedCount: 0 };
@@ -8988,7 +9485,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
       let totalDeleted = 0;
 
-      await db.transaction(async (tx) => {
+      await db.transaction(async (tx: any) => {
 
         await tx.delete(messages).where(inArray(messages.conversationId, conversationIds));
 
@@ -9314,7 +9811,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
 
       const contactsWithDetails = await Promise.all(
-        contactsData.map(async (contact) => {
+        contactsData.map(async (contact: Contact) => {
 
           const contactNotes = await db
             .select({
@@ -9353,7 +9850,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
             .orderBy(conversations.createdAt);
 
 
-          const uniqueChannels = channelRelationships.reduce((acc, rel) => {
+          const uniqueChannels = channelRelationships.reduce((acc: Record<string, any>, rel: { channelType: string | null; channelId: number | null; conversationCreatedAt: Date | null }) => {
             const key = `${rel.channelType}-${rel.channelId}`;
             if (!acc[key] || (
               rel.conversationCreatedAt && acc[key].conversationCreatedAt &&
@@ -9367,7 +9864,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
           return {
             ...contact,
             notes: contactNotes,
-            channelRelationships: Object.values(uniqueChannels).map(rel => ({
+            channelRelationships: (Object.values(uniqueChannels) as Array<{ channelId: number | null; channelType: string | null; connectionAccountId: string | null; connectionAccountName: string | null; connectionStatus: string | null; conversationCreatedAt: Date | null }>).map((rel) => ({
               channelId: rel.channelId,
               channelType: rel.channelType,
               connectionAccountId: rel.connectionAccountId,
@@ -9460,7 +9957,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
       const messagesData = await baseQuery.where(and(...whereConditions));
 
 
-      return messagesData.filter(message =>
+      return messagesData.filter((message: Message) =>
         !message.type ||
         ['text', 'template', 'interactive', 'list', 'button'].includes(message.type)
       );
@@ -9631,7 +10128,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .orderBy(flowSessionVariables.createdAt);
 
 
-      return variables.map(variable => ({
+      return variables.map((variable: any) => ({
         ...variable,
         nodeId: variable.nodeId || undefined
       }));
@@ -9681,7 +10178,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .limit(limit)
         .offset(offset);
 
-      return sessions.map(session => ({
+      return sessions.map((session: any) => ({
         sessionId: session.sessionId,
         status: session.status,
         startedAt: session.startedAt,
@@ -9747,7 +10244,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .offset(offset);
 
       return {
-        variables: variables.map(variable => ({
+        variables: variables.map((variable: any) => ({
           ...variable,
           nodeId: variable.nodeId || undefined
         })),
@@ -9774,7 +10271,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         return 0;
       }
 
-      const sessionIds = sessions.map(s => s.sessionId);
+      const sessionIds = sessions.map((s: any) => s.sessionId);
 
 
       await db
@@ -9936,7 +10433,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
       if (options?.search) {
         const searchTerm = options.search.toLowerCase();
-        return tasks.filter(task =>
+        return tasks.filter((task: ContactTask) =>
           task.title.toLowerCase().includes(searchTerm) ||
           (task.description && task.description.toLowerCase().includes(searchTerm))
         );
@@ -9986,17 +10483,43 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
   async updateContactTask(taskId: number, companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask> {
     try {
-      const updateData = {
-        ...updates,
-        updatedAt: new Date()
-      };
+      const updateData: any = {};
+
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (key !== 'updatedAt' && key !== 'createdAt' && key !== 'dueDate' && key !== 'completedAt') {
+          updateData[key] = value;
+        }
+      }
+
+
+      if (updates.dueDate !== undefined) {
+        if (typeof updates.dueDate === 'string') {
+          updateData.dueDate = new Date(updates.dueDate);
+        } else if (updates.dueDate instanceof Date) {
+          updateData.dueDate = updates.dueDate;
+        } else if (updates.dueDate === null) {
+          updateData.dueDate = null;
+        }
+      }
 
 
       if (updates.status === 'completed' && !updates.completedAt) {
         updateData.completedAt = new Date();
       } else if (updates.status !== 'completed') {
         updateData.completedAt = null;
+      } else if (updates.completedAt !== undefined) {
+        if (typeof updates.completedAt === 'string') {
+          updateData.completedAt = new Date(updates.completedAt);
+        } else if (updates.completedAt instanceof Date) {
+          updateData.completedAt = updates.completedAt;
+        } else if (updates.completedAt === null) {
+          updateData.completedAt = null;
+        }
       }
+
+
+      updateData.updatedAt = new Date();
 
       const [updatedTask] = await db
         .update(contactTasks)
@@ -10038,22 +10561,43 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
 
   async bulkUpdateContactTasks(taskIds: number[], companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask[]> {
     try {
-      const updateData: any = {
-        ...updates,
-        updatedAt: new Date()
-      };
+      const updateData: any = {};
+
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (key !== 'updatedAt' && key !== 'createdAt' && key !== 'dueDate' && key !== 'completedAt') {
+          updateData[key] = value;
+        }
+      }
+
+
+      if (updates.dueDate !== undefined) {
+        if (typeof updates.dueDate === 'string') {
+          updateData.dueDate = new Date(updates.dueDate);
+        } else if (updates.dueDate instanceof Date) {
+          updateData.dueDate = updates.dueDate;
+        } else if (updates.dueDate === null) {
+          updateData.dueDate = null;
+        }
+      }
 
 
       if (updates.status === 'completed' && !updates.completedAt) {
         updateData.completedAt = new Date();
       } else if (updates.status !== 'completed') {
         updateData.completedAt = null;
+      } else if (updates.completedAt !== undefined) {
+        if (typeof updates.completedAt === 'string') {
+          updateData.completedAt = new Date(updates.completedAt);
+        } else if (updates.completedAt instanceof Date) {
+          updateData.completedAt = updates.completedAt;
+        } else if (updates.completedAt === null) {
+          updateData.completedAt = null;
+        }
       }
 
 
-      if (updateData.status) {
-        updateData.status = updateData.status as any;
-      }
+      updateData.updatedAt = new Date();
 
       const updatedTasks = await db
         .update(contactTasks)
@@ -10075,6 +10619,330 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
     }
   }
 
+
+  async getCompanyTasks(companyId: number, options?: {
+    status?: string;
+    priority?: string;
+    assignedTo?: string;
+    contactId?: number;
+    search?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<{ tasks: ContactTask[]; total: number }> {
+    try {
+      const page = options?.page || 1;
+      const limit = options?.limit || 50;
+      const offset = (page - 1) * limit;
+
+      let whereConditions = [
+        eq(contactTasks.companyId, companyId)
+      ];
+
+      if (options?.status && options.status !== 'all') {
+        whereConditions.push(eq(contactTasks.status, options.status as any));
+      }
+
+      if (options?.priority && options.priority !== 'all') {
+        whereConditions.push(eq(contactTasks.priority, options.priority as any));
+      }
+
+      if (options?.assignedTo) {
+        whereConditions.push(eq(contactTasks.assignedTo, options.assignedTo));
+      }
+
+      if (options?.contactId) {
+        whereConditions.push(eq(contactTasks.contactId, options.contactId));
+      }
+
+
+      let allTasks = await db
+        .select()
+        .from(contactTasks)
+        .where(and(...whereConditions))
+        .orderBy(desc(contactTasks.createdAt));
+
+
+      if (options?.search) {
+        const searchTerm = options.search.toLowerCase();
+        
+
+        const allContacts = await db
+          .select()
+          .from(contacts)
+          .where(eq(contacts.companyId, companyId));
+        
+        const contactMap = new Map<number, Contact>(allContacts.map((contact: Contact) => [contact.id, contact]));
+        
+        allTasks = allTasks.filter((task: ContactTask) => {
+          const contact = contactMap.get(task.contactId);
+          const contactName = contact?.name || '';
+          
+          return task.title.toLowerCase().includes(searchTerm) ||
+            (task.description && task.description.toLowerCase().includes(searchTerm)) ||
+            (task.category && task.category.toLowerCase().includes(searchTerm)) ||
+            contactName.toLowerCase().includes(searchTerm);
+        });
+      }
+
+
+      const total = allTasks.length;
+
+
+      const tasks = allTasks.slice(offset, offset + limit);
+
+      return { tasks, total };
+    } catch (error) {
+      console.error('Error fetching company tasks:', error);
+      throw error;
+    }
+  }
+
+  async getTask(taskId: number, companyId: number): Promise<ContactTask | undefined> {
+    try {
+      const [task] = await db
+        .select()
+        .from(contactTasks)
+        .where(and(
+          eq(contactTasks.id, taskId),
+          eq(contactTasks.companyId, companyId)
+        ));
+
+      return task;
+    } catch (error) {
+      console.error('Error fetching task:', error);
+      throw error;
+    }
+  }
+
+  async createTask(task: InsertContactTask): Promise<ContactTask> {
+    try {
+      const taskData: any = { ...task };
+
+
+      if (taskData.dueDate && typeof taskData.dueDate === 'string') {
+        taskData.dueDate = new Date(taskData.dueDate);
+      }
+
+      const [newTask] = await db
+        .insert(contactTasks)
+        .values({
+          ...taskData,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        })
+        .returning();
+
+      return newTask;
+    } catch (error) {
+      console.error('Error creating task:', error);
+      throw error;
+    }
+  }
+
+  async updateTask(taskId: number, companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask> {
+    try {
+      const updateData: any = {};
+
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (key !== 'updatedAt' && key !== 'createdAt' && key !== 'dueDate' && key !== 'completedAt') {
+          updateData[key] = value;
+        }
+      }
+
+
+      if (updates.dueDate !== undefined) {
+        if (typeof updates.dueDate === 'string') {
+          updateData.dueDate = new Date(updates.dueDate);
+        } else if (updates.dueDate instanceof Date) {
+          updateData.dueDate = updates.dueDate;
+        } else if (updates.dueDate === null) {
+          updateData.dueDate = null;
+        }
+      }
+
+
+      if (updates.status === 'completed' && !updates.completedAt) {
+        updateData.completedAt = new Date();
+      } else if (updates.status !== 'completed') {
+        updateData.completedAt = null;
+      } else if (updates.completedAt !== undefined) {
+        if (typeof updates.completedAt === 'string') {
+          updateData.completedAt = new Date(updates.completedAt);
+        } else if (updates.completedAt instanceof Date) {
+          updateData.completedAt = updates.completedAt;
+        } else if (updates.completedAt === null) {
+          updateData.completedAt = null;
+        }
+      }
+
+
+      updateData.updatedAt = new Date();
+
+      const [updatedTask] = await db
+        .update(contactTasks)
+        .set(updateData)
+        .where(and(
+          eq(contactTasks.id, taskId),
+          eq(contactTasks.companyId, companyId)
+        ))
+        .returning();
+
+      if (!updatedTask) {
+        throw new Error('Task not found or access denied');
+      }
+
+      return updatedTask;
+    } catch (error) {
+      console.error('Error updating task:', error);
+      throw error;
+    }
+  }
+
+  async deleteTask(taskId: number, companyId: number): Promise<void> {
+    try {
+      const result = await db
+        .delete(contactTasks)
+        .where(and(
+          eq(contactTasks.id, taskId),
+          eq(contactTasks.companyId, companyId)
+        ));
+
+      if (result.rowCount === 0) {
+        throw new Error('Task not found or access denied');
+      }
+    } catch (error) {
+      console.error('Error deleting task:', error);
+      throw error;
+    }
+  }
+
+  async bulkUpdateTasks(taskIds: number[], companyId: number, updates: Partial<InsertContactTask>): Promise<ContactTask[]> {
+    try {
+      const updateData: any = {};
+
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (key !== 'updatedAt' && key !== 'createdAt' && key !== 'dueDate' && key !== 'completedAt') {
+          updateData[key] = value;
+        }
+      }
+
+
+      if (updates.dueDate !== undefined) {
+        if (typeof updates.dueDate === 'string') {
+          updateData.dueDate = new Date(updates.dueDate);
+        } else if (updates.dueDate instanceof Date) {
+          updateData.dueDate = updates.dueDate;
+        } else if (updates.dueDate === null) {
+          updateData.dueDate = null;
+        }
+      }
+
+
+      if (updates.status === 'completed' && !updates.completedAt) {
+        updateData.completedAt = new Date();
+      } else if (updates.status !== 'completed') {
+        updateData.completedAt = null;
+      } else if (updates.completedAt !== undefined) {
+        if (typeof updates.completedAt === 'string') {
+          updateData.completedAt = new Date(updates.completedAt);
+        } else if (updates.completedAt instanceof Date) {
+          updateData.completedAt = updates.completedAt;
+        } else if (updates.completedAt === null) {
+          updateData.completedAt = null;
+        }
+      }
+
+
+      updateData.updatedAt = new Date();
+
+      const updatedTasks = await db
+        .update(contactTasks)
+        .set(updateData)
+        .where(and(
+          inArray(contactTasks.id, taskIds),
+          eq(contactTasks.companyId, companyId)
+        ))
+        .returning();
+
+      if (updatedTasks.length === 0) {
+        throw new Error(`No tasks were updated. Please verify task IDs and permissions.`);
+      }
+
+      return updatedTasks;
+    } catch (error) {
+      console.error('Error bulk updating tasks:', error);
+      throw error;
+    }
+  }
+
+
+  async getTaskCategories(companyId: number): Promise<TaskCategory[]> {
+    try {
+      return await db
+        .select()
+        .from(taskCategories)
+        .where(eq(taskCategories.companyId, companyId))
+        .orderBy(taskCategories.name);
+    } catch (error) {
+      console.error('Error getting task categories:', error);
+      return [];
+    }
+  }
+
+  async createTaskCategory(data: InsertTaskCategory): Promise<TaskCategory> {
+    try {
+      const [category] = await db
+        .insert(taskCategories)
+        .values(data)
+        .returning();
+      return category;
+    } catch (error) {
+      console.error('Error creating task category:', error);
+      throw error;
+    }
+  }
+
+  async updateTaskCategory(id: number, companyId: number, data: Partial<InsertTaskCategory>): Promise<TaskCategory> {
+    try {
+      const updateData: any = { ...data };
+      delete updateData.updatedAt; // Remove updatedAt from data if it exists
+      updateData.updatedAt = new Date();
+
+      const [category] = await db
+        .update(taskCategories)
+        .set(updateData)
+        .where(and(
+          eq(taskCategories.id, id),
+          eq(taskCategories.companyId, companyId)
+        ))
+        .returning();
+
+      if (!category) {
+        throw new Error('Task category not found');
+      }
+
+      return category;
+    } catch (error) {
+      console.error('Error updating task category:', error);
+      throw error;
+    }
+  }
+
+  async deleteTaskCategory(id: number, companyId: number): Promise<void> {
+    try {
+      await db
+        .delete(taskCategories)
+        .where(and(
+          eq(taskCategories.id, id),
+          eq(taskCategories.companyId, companyId)
+        ));
+    } catch (error) {
+      console.error('Error deleting task category:', error);
+      throw error;
+    }
+  }
 
   async getContactActivity(contactId: number, options?: { type?: string; limit?: number }): Promise<any[]> {
     try {
@@ -10105,7 +10973,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
           .limit(10);
 
 
-        recentMessages.forEach(message => {
+        recentMessages.forEach((message: Message) => {
           if (!options?.type || options.type === 'all' || options.type === 'messages') {
             activities.push({
               id: `message-${message.id}`,
@@ -10113,10 +10981,10 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
               subtype: conversation.channelType,
               title: `${message.direction === 'outbound' ? 'Sent' : 'Received'} ${conversation.channelType} Message`,
               description: message.content?.substring(0, 100) + (message.content && message.content.length > 100 ? '...' : ''),
-              timestamp: message.timestamp,
+              timestamp: message.sentAt || message.createdAt || new Date(),
               status: message.direction === 'outbound' ? 'sent' : 'received',
               metadata: {
-                messageType: message.messageType,
+                messageType: message.type,
                 direction: message.direction,
                 conversationId: message.conversationId
               }
@@ -10133,7 +11001,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .orderBy(desc(contactAppointments.scheduledAt))
         .limit(20);
 
-      appointments.forEach(appointment => {
+      appointments.forEach((appointment: ContactAppointment) => {
         if (!options?.type || options.type === 'all' || options.type === 'meetings') {
           const isPast = new Date(appointment.scheduledAt) < new Date();
           activities.push({
@@ -10161,7 +11029,7 @@ async updateRolePermissions(role: 'admin' | 'agent', permissions: Record<string,
         .orderBy(desc(contactDocuments.createdAt))
         .limit(20);
 
-      documents.forEach(document => {
+      documents.forEach((document: ContactDocument) => {
         if (!options?.type || options.type === 'all' || options.type === 'documents') {
           activities.push({
             id: `document-${document.id}`,

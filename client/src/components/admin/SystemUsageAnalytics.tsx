@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from '@/hooks/use-translation';
 import { apiRequest } from '@/lib/queryClient';
+import { useCurrency } from '@/contexts/currency-context';
 import { OpenAIIcon } from "@/components/ui/openai-icon";
 import { Bot } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +45,7 @@ const AI_PROVIDERS = [
 
 export default function SystemUsageAnalytics() {
   const { t } = useTranslation();
+  const { formatCurrency } = useCurrency();
   const [dateRange, setDateRange] = useState('30d');
 
 
@@ -84,14 +86,6 @@ export default function SystemUsageAnalytics() {
     refetchInterval: 5 * 60 * 1000, // Refetch every 5 minutes
   });
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      minimumFractionDigits: 4,
-      maximumFractionDigits: 6
-    }).format(amount);
-  };
 
   const formatNumber = (num: number) => {
     return new Intl.NumberFormat('en-US').format(num);

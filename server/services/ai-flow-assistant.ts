@@ -40,8 +40,7 @@ interface ChatRequest {
   conversationHistory: ChatMessage[];
   companyId: number;
   userId: number;
-  credentialSource?: 'auto' | 'company' | 'system' | 'manual';
-  apiKey?: string;
+  credentialSource?: 'auto' | 'company' | 'system';
 }
 
 interface ChatResponse {
@@ -66,18 +65,9 @@ class AIFlowAssistantService {
    */
   private async getOpenAIClient(
     companyId: number,
-    credentialSource: 'auto' | 'company' | 'system' | 'manual' = 'auto',
-    manualApiKey?: string
+    credentialSource: 'auto' | 'company' | 'system' = 'auto'
   ): Promise<OpenAI> {
     try {
-
-      if (credentialSource === 'manual') {
-        if (!manualApiKey) {
-          throw new Error('Manual API key is required when using manual credential source.');
-        }
-        return new OpenAI({ apiKey: manualApiKey });
-      }
-
 
       const credentialResult = await aiCredentialsService.getCredentialWithPreference(
         companyId,
@@ -87,9 +77,9 @@ class AIFlowAssistantService {
 
       if (!credentialResult) {
         const errorMessages = {
-          auto: 'No OpenAI API key configured. Please configure OpenAI credentials in the AI settings or provide a manual API key.',
-          company: 'No company OpenAI credentials configured. Please set up company-specific OpenAI credentials.',
-          system: 'No system OpenAI credentials configured. Please contact your administrator.'
+          auto: 'No OpenAI API key configured. Please configure OpenAI credentials in the AI settings (Company or System level).',
+          company: 'No company OpenAI credentials configured. Please set up company-specific OpenAI credentials in the AI settings.',
+          system: 'No system OpenAI credentials configured. Please contact your administrator to configure system-level OpenAI credentials.'
         };
 
         throw new Error(errorMessages[credentialSource] || 'OpenAI API key not configured.');
@@ -121,8 +111,7 @@ class AIFlowAssistantService {
     try {
       const openai = await this.getOpenAIClient(
         request.companyId,
-        request.credentialSource || 'auto',
-        request.apiKey
+        request.credentialSource || 'auto'
       );
 
 
@@ -148,7 +137,7 @@ class AIFlowAssistantService {
             type: 'function',
             function: {
               name: 'generate_flow',
-              description: 'Generate a complete BotHive flow with intelligent node configuration and smart connections',
+              description: 'Generate a complete PowerChat flow with intelligent node configuration and smart connections',
               parameters: {
               type: 'object',
               properties: {
@@ -305,7 +294,7 @@ ${flowSuggestion.reasoning}`;
   }
 
   /**
-   * Get comprehensive system prompt with BotHive knowledge
+   * Get comprehensive system prompt with PowerChat knowledge
    */
   private async getSystemPrompt(flowId?: number): Promise<string> {
     let currentFlowContext = '';
@@ -329,7 +318,7 @@ ${flowSuggestion.reasoning}`;
       }
     }
 
-    return `You are an expert AI Flow Assistant for BotHive, a sophisticated chatbot automation platform. Your role is to help users build, optimize, and understand conversational flows.
+    return `You are an expert AI Flow Assistant for PowerChat, a sophisticated chatbot automation platform. Your role is to help users build, optimize, and understand conversational flows.
 
 CORE CAPABILITIES:
 1. **Flow Analysis**: Analyze user scenarios and recommend optimal node sequences
@@ -419,7 +408,7 @@ RESPONSE GUIDELINES:
 - Use the generate_flow function when users want complete flows
 - Ask clarifying questions for complex scenarios${currentFlowContext}
 
-Remember: You're helping users build powerful automation flows. Focus on practical, implementable solutions that leverage BotHive's full capabilities.`;
+Remember: You're helping users build powerful automation flows. Focus on practical, implementable solutions that leverage PowerChat's full capabilities.`;
   }
 
   /**

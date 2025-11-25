@@ -3807,7 +3807,7 @@
     },
     {
         "key": "admin.backup.upload.file_help",
-        "value": "Maximum file size: 500MB. Supported formats: .sql, .backup, .dump, .bak"
+        "value": "Maximum file size: 3000MB. Supported formats: .sql, .backup, .dump, .bak"
     },
     {
         "key": "admin.backup.upload.description_label",
@@ -11109,7 +11109,7 @@
     },
     {
         "key": "flow_builder.ai_calendar_system_prompt_note",
-        "value": "Note: Calendar behavior is controlled by the main system prompt above."
+        "value": "Core calendar behavior is enforced when enabled. The prompt customizes tone and extra guidance."
     },
     {
         "key": "flow_builder.ai_business_hours_start",
@@ -15009,7 +15009,7 @@
     },
     {
         "key": "landing.hero.subtitle",
-        "value": "Join thousands of businesses using BotHive to streamline their customer interactions and boost satisfaction rates."
+        "value": "Join thousands of businesses using PowerChat to streamline their customer interactions and boost satisfaction rates."
     },
     {
         "key": "landing.hero.start_free_trial",
@@ -15101,7 +15101,7 @@
     },
     {
         "key": "landing.cta.subtitle",
-        "value": "Join thousands of businesses using BotHive to streamline their customer interactions and boost satisfaction rates."
+        "value": "Join thousands of businesses using PowerChat to streamline their customer interactions and boost satisfaction rates."
     },
     {
         "key": "landing.cta.start_free_trial",
@@ -15962,5 +15962,153 @@
     {
         "key": "nav.renewal_due",
         "value": "Renewal due"
+    },
+    {
+        "key": "ai_assistant.audio_capability_process",
+        "value": "process and understand voice messages/audio files"
+    },
+    {
+        "key": "ai_assistant.audio_capability_generate",
+        "value": "generate voice responses using {{provider}} text-to-speech technology"
+    },
+    {
+        "key": "ai_assistant.voice_mode_always_prompt",
+        "value": "You will respond with both text and voice messages for all interactions."
+    },
+    {
+        "key": "ai_assistant.voice_mode_voice_only_prompt",
+        "value": "You will respond with voice messages only when the user sends you a voice message."
+    },
+    {
+        "key": "ai_assistant.voice_mode_never_prompt",
+        "value": "You will only respond with text messages."
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_title",
+        "value": "AUDIO PROCESSING CAPABILITIES:"
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_intro",
+        "value": "You have advanced audio processing capabilities and can {{capabilities}}"
+    },
+    {
+        "key": "ai_assistant.audio_guidelines_important",
+        "value": "IMPORTANT AUDIO GUIDELINES:"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_can_process",
+        "value": "You CAN process voice messages and audio files that users send to you"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_acknowledge",
+        "value": "When users send voice messages, acknowledge that you received and understood their audio message"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_understand",
+        "value": "You can understand speech, transcribe audio content, and respond appropriately to voice inputs"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_limit",
+        "value": "Audio messages are limited to {{maxDuration}} seconds for processing efficiency"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_never_claim",
+        "value": "Never claim that you cannot process voice messages or audio files - you have full audio processing capabilities"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_natural",
+        "value": "Respond naturally to voice messages as you would to any text message"
+    },
+    {
+        "key": "ai_assistant.audio_guideline_conversational",
+        "value": "Be conversational. And don't tell the user that you have the ability of voice processing etc just respond to their request directly."
+    },
+    {
+        "key": "ai_assistant.error_transcription_failed",
+        "value": "Audio transcription failed: {{error}}"
+    },
+    {
+        "key": "ai_assistant.error_speech_generation_failed",
+        "value": "Speech generation failed: {{error}}"
+    },
+    {
+        "key": "ai_assistant.error_no_api_key",
+        "value": "No API key available for {{provider}} provider. Please configure credentials in the admin panel or provide an API key in the node settings."
+    },
+    {
+        "key": "ai_assistant.error_audio_file_not_found",
+        "value": "Audio file not found: {{path}}"
+    },
+    {
+        "key": "ai_assistant.audio_too_long_warning",
+        "value": "Your audio message is too long for processing. Please send a shorter message (under {{maxDuration}} seconds) or type your message instead."
+    },
+    {
+        "key": "ai_assistant.voice_message_transcription_failed",
+        "value": "Voice message (transcription failed)"
+    },
+    {
+        "key": "ai_assistant.voice_message_transcription_error",
+        "value": "Voice message (transcription failed: {{error}})"
+    },
+    {
+        "key": "ai_assistant.knowledge_base_context_template",
+        "value": "Based on the following knowledge base information:\n\n{{context}}\n\nPlease answer the user's question using this information when relevant."
+    },
+    {
+        "key": "ai_assistant.knowledge_base_document_label",
+        "value": "[Document: {{name}}] (Relevance: {{similarity}}%)"
+    },
+    {
+        "key": "ai_assistant.function_calling_rules_title",
+        "value": "IMPORTANT FUNCTION CALLING RULES:"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_explicit",
+        "value": "Only call functions when the user explicitly requests the specific action"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_no_greetings",
+        "value": "Do NOT call functions for general greetings, questions, or casual conversation"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_clear_intent",
+        "value": "Do NOT call functions unless there is clear, unambiguous user intent"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_greeting_examples",
+        "value": "For greetings like \"Hello\", \"Hi\", \"How are you?\" - respond normally without calling any functions"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_specific",
+        "value": "Only use functions when the user specifically asks for something that matches the function's purpose"
+    },
+    {
+        "key": "ai_assistant.function_calling_rule_conservative",
+        "value": "Be conservative - when in doubt, respond normally without calling functions"
+    },
+    {
+        "key": "ai_assistant.respond_in_language",
+        "value": "Respond in {{language}}."
+    },
+    {
+        "key": "ai_assistant.default_system_prompt",
+        "value": "You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them."
+    },
+    {
+        "key": "flow_builder.ai_language_label",
+        "value": "Response Language"
+    },
+    {
+        "key": "flow_builder.ai_language_description",
+        "value": "Select the language the AI assistant should use for responses"
+    },
+    {
+        "key": "flow_builder.ai_language_placeholder",
+        "value": "Select language..."
+    },
+    {
+        "key": "flow_builder.ai_default_system_prompt",
+        "value": "You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them."
     }
 ]

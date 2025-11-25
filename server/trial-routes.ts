@@ -115,8 +115,7 @@ export function setupTrialRoutes(app: Express) {
       newTrialEndDate.setDate(newTrialEndDate.getDate() + additionalDays);
 
       await storage.updateCompany(companyId, {
-        trialEndDate: newTrialEndDate,
-        updatedAt: new Date()
+        trialEndDate: newTrialEndDate
       });
 
       res.json({

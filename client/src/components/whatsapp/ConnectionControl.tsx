@@ -52,13 +52,8 @@ const ConnectionControl: React.FC<ConnectionControlProps> = ({
     }
   }, [status]);
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      queryClient.invalidateQueries({ queryKey: ['/api/channel-connections'] });
-    }, 30000);
 
-    return () => clearInterval(interval);
-  }, [queryClient]);
+
 
   useEffect(() => {
   }, [connectionId, onMessage, queryClient]);

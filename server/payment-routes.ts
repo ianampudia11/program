@@ -14,6 +14,31 @@ const ensureAuthenticated = (req: Request, res: Response, next: NextFunction) =>
 };
 
 export function registerPaymentRoutes(app: Express) {
+
+  const getDefaultCurrency = async (): Promise<string> => {
+    try {
+      const generalSettings = await storage.getAppSetting('general_settings');
+      if (generalSettings?.value && typeof generalSettings.value === 'object') {
+        const settings = generalSettings.value as any;
+        return settings.defaultCurrency || 'USD';
+      }
+      return 'USD';
+    } catch (error) {
+      console.error('Error fetching default currency:', error);
+      return 'USD';
+    }
+  };
+
+  const formatDarajaTimestamp = (date: Date = new Date()) => {
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${year}${month}${day}${hours}${minutes}${seconds}`;
+  };
   app.get("/api/payment/methods", ensureAuthenticated, async (req, res) => {
     try {
       const paymentMethods = [];
@@ -104,15 +129,24 @@ export function registerPaymentRoutes(app: Express) {
 
       const stripeSettings = stripeSettingObj.value as any;
 
-      const stripe = new Stripe(stripeSettings.secretKey, {
-        apiVersion: '2025-08-27.basil'
-      });
+      const stripe = new Stripe(stripeSettings.secretKey);
+
+      const defaultCurrency = await getDefaultCurrency();
+      
+
+      const supportedCurrencies = ['usd', 'eur', 'gbp', 'cad', 'aud', 'jpy', 'chf', 'nzd', 'sek', 'nok', 'dkk', 'pln', 'czk', 'huf', 'ron', 'bgn', 'hrk', 'rub', 'try', 'brl', 'mxn', 'ars', 'clp', 'cop', 'pen', 'inr', 'sgd', 'hkd', 'krw', 'twd', 'thb', 'myr', 'php', 'idr', 'vnd', 'aed', 'sar', 'ils', 'zar', 'ngn', 'egp', 'kes'];
+      const currencyLower = defaultCurrency.toLowerCase();
+      if (!supportedCurrencies.includes(currencyLower)) {
+        return res.status(400).json({ 
+          error: `Currency ${defaultCurrency} is not supported by Stripe. Please configure a supported currency in General Settings.` 
+        });
+      }
 
       const transaction = await storage.createPaymentTransaction({
         companyId: req.user.companyId,
         planId,
         amount: plan.price,
-        currency: 'USD',
+        currency: defaultCurrency,
         status: 'pending',
         paymentMethod: 'stripe'
       });
@@ -122,7 +156,7 @@ export function registerPaymentRoutes(app: Express) {
         line_items: [
           {
             price_data: {
-              currency: 'usd',
+              currency: currencyLower,
               product_data: {
                 name: plan.name,
                 description: plan.description || ''
@@ -182,11 +216,22 @@ export function registerPaymentRoutes(app: Express) {
         return res.status(400).json({ error: "Mercado Pago settings are incomplete" });
       }
 
+      const defaultCurrency = await getDefaultCurrency();
+      
+
+
+      const supportedCurrencies = ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'VEF'];
+      if (!supportedCurrencies.includes(defaultCurrency.toUpperCase())) {
+        return res.status(400).json({ 
+          error: `Currency ${defaultCurrency} may not be supported by Mercado Pago. Supported currencies: ${supportedCurrencies.join(', ')}. Please verify your Mercado Pago account configuration.` 
+        });
+      }
+
       const transaction = await storage.createPaymentTransaction({
         companyId: req.user.companyId,
         planId,
         amount: plan.price,
-        currency: 'USD',
+        currency: defaultCurrency,
         status: 'pending',
         paymentMethod: 'mercadopago'
       });
@@ -198,7 +243,7 @@ export function registerPaymentRoutes(app: Express) {
             title: plan.name,
             description: plan.description || 'Subscription plan',
             quantity: 1,
-            currency_id: 'USD',
+            currency_id: defaultCurrency.toUpperCase(),
             unit_price: plan.price
           }
         ],
@@ -317,11 +362,21 @@ export function registerPaymentRoutes(app: Express) {
 
       const client = new paypal.core.PayPalHttpClient(environment);
 
+      const defaultCurrency = await getDefaultCurrency();
+      
+
+      const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+      if (!supportedCurrencies.includes(defaultCurrency.toUpperCase())) {
+        return res.status(400).json({ 
+          error: `Currency ${defaultCurrency} may not be supported by PayPal. Please verify your PayPal account configuration supports this currency.` 
+        });
+      }
+
       const transaction = await storage.createPaymentTransaction({
         companyId: req.user.companyId,
         planId,
         amount: plan.price,
-        currency: 'USD',
+        currency: defaultCurrency,
         status: 'pending',
         paymentMethod: 'paypal'
       });
@@ -332,7 +387,7 @@ export function registerPaymentRoutes(app: Express) {
         intent: 'CAPTURE',
         purchase_units: [{
           amount: {
-            currency_code: 'USD',
+            currency_code: defaultCurrency.toUpperCase(),
             value: plan.price.toString()
           },
           description: plan.description,
@@ -392,6 +447,15 @@ export function registerPaymentRoutes(app: Express) {
 
       if (!moyasarSettings.publishableKey) {
         return res.status(400).json({ error: "Moyasar publishable key is missing" });
+      }
+
+      const defaultCurrency = await getDefaultCurrency();
+      
+
+      if (defaultCurrency.toUpperCase() !== 'SAR') {
+        return res.status(400).json({ 
+          error: `Moyasar only supports SAR (Saudi Riyal). Current configured currency is ${defaultCurrency}. Please change the default currency to SAR in General Settings to use Moyasar.` 
+        });
       }
 
       const transaction = await storage.createPaymentTransaction({
@@ -466,6 +530,15 @@ export function registerPaymentRoutes(app: Express) {
       }
 
 
+      const defaultCurrency = await getDefaultCurrency();
+      
+
+      if (defaultCurrency.toUpperCase() !== 'KES') {
+        return res.status(400).json({ 
+          error: `MPESA only supports KES (Kenyan Shillings). Current configured currency is ${defaultCurrency}. Please change the default currency to KES in General Settings to use MPESA.` 
+        });
+      }
+
       const transaction = await storage.createPaymentTransaction({
         companyId: req.user.companyId,
         planId,
@@ -495,21 +568,25 @@ export function registerPaymentRoutes(app: Express) {
       const accessToken = authData.access_token;
 
 
-      const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, -3);
+      const timestamp = formatDarajaTimestamp();
       const password = Buffer.from(`${mpesaSettings.businessShortcode}${mpesaSettings.passkey}${timestamp}`).toString('base64');
 
 
+      const transactionType = mpesaSettings.shortcodeType === 'buygoods' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline';
+      const callbackUrl = (mpesaSettings.callbackUrl && typeof mpesaSettings.callbackUrl === 'string')
+        ? mpesaSettings.callbackUrl
+        : `${req.protocol}://${req.get('host')}/api/webhooks/mpesa`;
       const stkPushPayload = {
         BusinessShortCode: mpesaSettings.businessShortcode,
         Password: password,
         Timestamp: timestamp,
-        TransactionType: "CustomerPayBillOnline",
+        TransactionType: transactionType,
         Amount: Math.round(Number(plan.price)), // Convert to whole KES
         PartyA: phoneNumber,
         PartyB: mpesaSettings.businessShortcode,
         PhoneNumber: phoneNumber,
-        CallBackURL: `${process.env.BASE_URL || 'http://localhost:3000'}/api/webhooks/mpesa`,
-        AccountReference: `BotHive-${transaction.id}`,
+        CallBackURL: callbackUrl,
+        AccountReference: `PowerChat-${transaction.id}`,
         TransactionDesc: `${plan.name} - ${plan.description || 'Subscription plan'}`
       };
 

@@ -54,6 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getPlanBillingPeriod } from "@/utils/plan-duration";
+import { useCurrency } from "@/contexts/currency-context";
 
 interface Company {
   id: number;
@@ -185,6 +186,7 @@ type CompanyFormValues = z.infer<typeof companySchema>;
 export default function CompanyDetailPage() {
   const { user, isLoading: isLoadingAuth, impersonateCompanyMutation } = useAuth();
   const { plans, isLoading: isLoadingPlans } = usePlans();
+  const { formatCurrency } = useCurrency();
   const [_, navigate] = useLocation();
   const [match, params] = useRoute<{ id: string }>("/admin/companies/:id");
   const { toast } = useToast();
@@ -728,7 +730,7 @@ export default function CompanyDetailPage() {
                                   ) : (
                                     plans.map((plan) => (
                                       <SelectItem key={plan.id} value={plan.id.toString()}>
-                                        {plan.name} (${plan.price}{getPlanBillingPeriod(plan)})
+                                        {plan.name} ({formatCurrency(plan.price)}{getPlanBillingPeriod(plan)})
                                       </SelectItem>
                                     ))
                                   )}

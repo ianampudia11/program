@@ -455,7 +455,123 @@ class ZohoCalendarService {
   }
 
   /**
+   * Check if a time slot is available before booking
+   * Uses listCalendarEvents to check for overlapping events
+   * 
+   * NOTE: This method performs a non-atomic read-then-write check. In rare concurrent
+   * scenarios, overlapping bookings can still occur because availability is checked before
+   * event insertion. For stronger guarantees, consider implementing application-level
+   * locking or reservation mechanisms (e.g., a database record keyed by calendar/time slot)
+   * and enforce it in the flow before calling the calendar service.
+   * 
+   * @param userId The user ID
+   * @param companyId The company ID
+   * @param startDateTime ISO string of the event start time
+   * @param endDateTime ISO string of the event end time
+   * @param bufferMinutes Buffer time to add before/after the event (default 0)
+   * @returns Object with available flag and optional conflicting events
+   */
+  private async checkTimeSlotAvailability(
+    userId: number,
+    companyId: number,
+    startDateTime: string,
+    endDateTime: string,
+    bufferMinutes: number = 0
+  ): Promise<{ available: boolean, conflictingEvents?: any[], error?: string }> {
+    try {
+      const client = await this.getCalendarClient(userId, companyId);
+
+      if (!client) {
+        return {
+          available: true, // Fail-open: if we can't check, allow creation
+          error: 'Calendar client not available for availability check'
+        };
+      }
+
+
+      const startDate = new Date(startDateTime);
+      const endDate = new Date(endDateTime);
+      startDate.setMinutes(startDate.getMinutes() - bufferMinutes);
+      endDate.setMinutes(endDate.getMinutes() + bufferMinutes);
+
+      const timeMin = startDate.toISOString();
+      const timeMax = endDate.toISOString();
+
+
+      const eventsResult = await this.listCalendarEvents(
+        userId,
+        companyId,
+        timeMin,
+        timeMax,
+        100 // Get up to 100 events to check for conflicts
+      );
+
+      if (!eventsResult.success) {
+        return {
+          available: true, // Fail-open
+          error: eventsResult.error || 'Failed to list events for availability check'
+        };
+      }
+
+      const existingEvents = eventsResult.items || [];
+      
+
+
+      const effectiveRequestedStart = new Date(startDateTime);
+      const effectiveRequestedEnd = new Date(endDateTime);
+      effectiveRequestedStart.setMinutes(effectiveRequestedStart.getMinutes() - bufferMinutes);
+      effectiveRequestedEnd.setMinutes(effectiveRequestedEnd.getMinutes() + bufferMinutes);
+
+      const requestedStart = effectiveRequestedStart.getTime();
+      const requestedEnd = effectiveRequestedEnd.getTime();
+
+
+      const conflictingEvents = existingEvents.filter((event: any) => {
+        const eventStart = new Date(event.start?.dateTime || event.start).getTime();
+        const eventEnd = new Date(event.end?.dateTime || event.end).getTime();
+
+
+
+        return (eventStart < requestedEnd && eventEnd > requestedStart);
+      });
+
+      if (conflictingEvents.length > 0) {
+        return {
+          available: false,
+          conflictingEvents: conflictingEvents
+        };
+      }
+
+      return { available: true };
+    } catch (error: any) {
+      console.error('Zoho Calendar Service: Error checking time slot availability:', {
+        error: error.message,
+        userId,
+        companyId,
+        startDateTime,
+        endDateTime
+      });
+
+      return {
+        available: true,
+        error: error.message || 'Failed to check availability'
+      };
+    }
+  }
+
+  /**
    * Create a calendar event
+   * Now includes conflict detection to prevent double bookings
+   * 
+   * NOTE: Conflict detection is non-atomic (read-then-write). Concurrent requests can still
+   * result in overlapping bookings in rare scenarios. See checkTimeSlotAvailability() documentation
+   * for details on implementing stronger guarantees.
+   * 
+   * @param userId The user ID
+   * @param companyId The company ID
+   * @param eventData Event data including start, end, summary, etc.
+   * @param eventData.bufferMinutes Optional buffer minutes to respect when checking for conflicts
+   * @returns Success status with event ID and link, or error message
    */
   public async createCalendarEvent(
     userId: number,
@@ -470,6 +586,35 @@ class ZohoCalendarService {
     if (!startDateTime || !endDateTime) {
       console.error('Zoho Calendar Service: Missing start or end time');
       return { success: false, error: 'Start and end times are required' };
+    }
+
+
+    const bufferMinutes = eventData.bufferMinutes || 0;
+
+
+    const availabilityCheck = await this.checkTimeSlotAvailability(
+      userId,
+      companyId,
+      startDateTime,
+      endDateTime,
+      bufferMinutes
+    );
+
+    if (!availabilityCheck.available) {
+      
+      return {
+        success: false,
+        error: 'The requested time slot is not available. Please choose a different time.'
+      };
+    }
+
+
+    if (availabilityCheck.error) {
+      console.warn('Zoho Calendar Service: Availability check failed, proceeding with creation', {
+        error: availabilityCheck.error,
+        userId,
+        companyId
+      });
     }
 
     try {

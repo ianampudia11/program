@@ -316,6 +316,26 @@ export function CampaignBuilder() {
     }
   );
 
+
+  const filteredTemplates = templates.filter((template) => {
+    if (campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL) {
+
+      return template.whatsappChannelType === 'official' &&
+             template.whatsappTemplateStatus === 'approved';
+    } else {
+
+      return template.whatsappChannelType === 'unofficial';
+    }
+  });
+
+
+  const isOfficialTemplateSelected = () => {
+    if (!campaignData.templateId) return false;
+    if (campaignData.whatsappChannelType !== WHATSAPP_CHANNEL_TYPES.OFFICIAL) return false;
+    const selectedTemplate = templates.find(t => t.id === campaignData.templateId);
+    return selectedTemplate?.whatsappChannelType === 'official';
+  };
+
   useEffect(() => {
     fetchTemplates();
     fetchSegments();
@@ -336,7 +356,34 @@ export function CampaignBuilder() {
     if (campaignData.segmentId && (campaignData.whatsappAccountIds?.length || campaignData.channelIds?.length)) {
       calculateOptimalRateLimit();
     }
-  }, [campaignData.whatsappChannelType, campaignData.segmentId, campaignData.whatsappAccountIds, campaignData.channelIds]);
+  }, [campaignData.whatsappChannelType, campaignData.segmentId, campaignData.whatsappAccountIds, campaignData.channelIds, segments]);
+
+
+  useEffect(() => {
+    if (campaignData.templateId) {
+      const selectedTemplate = templates.find(t => t.id === campaignData.templateId);
+      if (selectedTemplate) {
+
+        const isCompatible = campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
+          ? selectedTemplate.whatsappChannelType === 'official' && selectedTemplate.whatsappTemplateStatus === 'approved'
+          : selectedTemplate.whatsappChannelType === 'unofficial';
+
+        if (!isCompatible) {
+
+          setCampaignData(prev => ({
+            ...prev,
+            templateId: undefined,
+            content: ''
+          }));
+          toast({
+            title: t('campaigns.builder.messages.template_cleared', 'Template Cleared'),
+            description: t('campaigns.builder.messages.template_incompatible', 'The selected template is not compatible with the current channel type and has been cleared.'),
+            variant: 'default'
+          });
+        }
+      }
+    }
+  }, [campaignData.whatsappChannelType, campaignData.templateId, templates, toast, t]);
 
   const fetchTemplates = async () => {
     try {
@@ -509,13 +556,16 @@ export function CampaignBuilder() {
     }));
   };
 
-  const handleSegmentCreated = (newSegment: ContactSegment) => {
+  const handleSegmentCreated = async (newSegment: ContactSegment) => {
     setSegments(prev => [newSegment, ...prev]);
 
     setCampaignData(prev => ({
       ...prev,
       segmentId: newSegment.id
     }));
+
+
+    await fetchSegments();
 
     toast({
       title: t('common.success', 'Success'),
@@ -628,13 +678,15 @@ export function CampaignBuilder() {
 
         setSegments(prev => prev.filter(s => s.id !== segmentId));
 
-
         if (campaignData.segmentId === segmentId) {
           setCampaignData(prev => ({
             ...prev,
             segmentId: undefined
           }));
         }
+
+
+        await fetchSegments();
 
         toast({
           title: t('common.success', 'Success'),
@@ -1305,11 +1357,15 @@ export function CampaignBuilder() {
                     const segment = segments.find(s => s.id === campaignData.segmentId);
                     return segment ? (
                       <div>
-                        <h4 className="font-medium">{segment.name}</h4>
-                        <p className="text-sm text-muted-foreground">{segment.description}</p>
-                        <p className="text-sm mt-2">
-                          <strong>{segment.contactCount}</strong> {t('campaigns.builder.audience.will_receive', 'contacts will receive this campaign')}
-                        </p>
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <h4 className="font-medium">{segment.name}</h4>
+                            <p className="text-sm text-muted-foreground">{segment.description}</p>
+                            <p className="text-sm mt-2">
+                              <strong>{segment.contactCount}</strong> {t('campaigns.builder.audience.unique_contacts_will_receive', 'unique contacts will receive this campaign')}
+                            </p>
+                          </div>
+                        </div>
                       </div>
                     ) : null;
                   })()}
@@ -1324,7 +1380,19 @@ export function CampaignBuilder() {
           <div className="space-y-4">
             <div>
               <div className="flex items-center justify-between mb-2">
-                <Label>{t('campaigns.builder.content.template_label', 'Use Template (Optional)')}</Label>
+                <div className="flex items-center gap-2">
+                  <Label>
+                    {t('campaigns.builder.content.template_label', 'Use Template (Optional)')}
+                  </Label>
+                  {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL && (
+                    <Badge variant="secondary" className="text-xs">
+                      {t('campaigns.builder.content.approved_only', 'Approved only')}
+                    </Badge>
+                  )}
+                  <span className="text-xs text-muted-foreground">
+                    ({filteredTemplates.length} {t('campaigns.builder.content.available', 'available')})
+                  </span>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -1342,47 +1410,69 @@ export function CampaignBuilder() {
                     <SelectValue placeholder={t('campaigns.builder.content.template_placeholder', 'Choose a template')} />
                   </SelectTrigger>
                   <SelectContent>
-                    {templates.map((template) => (
-                      <SelectItem key={template.id} value={template.id.toString()}>
-                        {template.name} ({template.category})
-                      </SelectItem>
-                    ))}
+                    {filteredTemplates.length > 0 ? (
+                      filteredTemplates.map((template) => (
+                        <SelectItem key={template.id} value={template.id.toString()}>
+                          <div className="flex items-center justify-between w-full">
+                            <span>
+                              {template.name}
+                              {template.whatsappTemplateName && ` (${template.whatsappTemplateName})`}
+                            </span>
+                            {template.whatsappTemplateId && (
+                              <Badge variant="secondary" className="ml-2 text-xs">
+                                Meta
+                              </Badge>
+                            )}
+                          </div>
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                        {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
+                          ? t('campaigns.builder.content.no_approved_templates', 'No approved templates available. Please sync templates from Meta or create and submit new templates for approval.')
+                          : t('campaigns.builder.content.no_templates', 'No templates available. Create a new template to get started.')}
+                      </div>
+                    )}
                   </SelectContent>
                 </Select>
-                {campaignData.templateId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setEditTemplateId(campaignData.templateId!)}
-                    className="flex items-center gap-2"
-                  >
-                    <Edit className="w-4 h-4" />
-                    {t('common.edit', 'Edit')}
-                  </Button>
-                )}
-              </div>
+                {campaignData.templateId && (() => {
+                  const selectedTemplate = templates.find(t => t.id === campaignData.templateId);
+                  const isMetaTemplate = selectedTemplate?.whatsappTemplateId ? true : false;
 
-              {/* Template limitations warning for unofficial channels */}
-              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL && (
-                <div className="mt-2 p-3 bg-gray-50 border border-gray-200 rounded-lg">
-                  <div className="flex items-start gap-2">
-                    <BadgeInfo className="w-4 h-4 text-gray-600 mt-0.5" />
-                    <div className="text-sm">
-                      <div className="font-medium text-gray-800 mb-1">
-                        {t('campaigns.builder.content.unofficial_template_info', 'Template Limitations')}
-                      </div>
-                      <div className="text-gray-700">
-                        <p>{t('campaigns.builder.content.unofficial_template_desc', 'Templates on unofficial channels are basic text only. WhatsApp Business API templates with buttons, media, and variables are not supported.')}</p>
-                      </div>
+                  return (
+                    <div className="relative group">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => !isMetaTemplate && setEditTemplateId(campaignData.templateId!)}
+                        disabled={isMetaTemplate}
+                        className="flex items-center gap-2"
+                      >
+                        <Edit className="w-4 h-4" />
+                        {t('common.edit', 'Edit')}
+                      </Button>
+                      {isMetaTemplate && (
+                        <div className="absolute left-0 top-full mt-1 hidden group-hover:block z-[9999] w-64 p-2 bg-gray-900 text-white text-xs rounded shadow-lg pointer-events-none">
+                          {t('campaigns.builder.content.meta_template_readonly', 'This template is synced from Meta Business Manager and can only be edited there.')}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                </div>
-              )}
+                  );
+                })()}
+              </div>
             </div>
 
             <div>
-              <Label htmlFor="content">{t('campaigns.builder.content.message_label', 'Message Content')}</Label>
+              <div className="flex items-center justify-between mb-2">
+                <Label htmlFor="content">{t('campaigns.builder.content.message_label', 'Message Content')}</Label>
+                {isOfficialTemplateSelected() && (
+                  <Badge variant="secondary" className="text-xs">
+                    <Shield className="w-3 h-3 mr-1" />
+                    {t('campaigns.builder.content.readonly_template', 'Approved Template (Read-only)')}
+                  </Badge>
+                )}
+              </div>
               <Textarea
                 ref={contentTextareaRef}
                 id="content"
@@ -1390,304 +1480,32 @@ export function CampaignBuilder() {
                 onChange={(e) => setCampaignData(prev => ({ ...prev, content: e.target.value }))}
                 placeholder={t('campaigns.builder.content.message_placeholder', 'Enter your message content. Click \'Insert Variable\' to add personalization...')}
                 rows={6}
+                readOnly={isOfficialTemplateSelected()}
+                className={isOfficialTemplateSelected() ? 'bg-muted cursor-not-allowed' : ''}
               />
 
-              <div className="mt-2">
-                <VariableInsertion
-                  textareaRef={contentTextareaRef}
-                  value={campaignData.content}
-                  onChange={(content) => setCampaignData(prev => ({ ...prev, content }))}
-                  customVariables={['company', 'position', 'location', 'industry']}
-                />
-              </div>
+              {!isOfficialTemplateSelected() && (
+                <div className="mt-2">
+                  <VariableInsertion
+                    textareaRef={contentTextareaRef}
+                    value={campaignData.content}
+                    onChange={(content) => setCampaignData(prev => ({ ...prev, content }))}
+                    customVariables={['company', 'position', 'location', 'industry']}
+                  />
+                </div>
+              )}
+
+              {isOfficialTemplateSelected() && (
+                <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                  <p className="text-sm text-blue-800">
+                    <BadgeInfo className="w-4 h-4 inline mr-1" />
+                    {t('campaigns.builder.content.template_readonly_info', 'This template content is approved by Meta and cannot be modified. Variables will be automatically replaced with recipient data when sending.')}
+                  </p>
+                </div>
+              )}
             </div>
 
-            {/* Media Upload Section */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Image className="w-4 h-4" />
-                  {t('campaigns.builder.content.media_title', 'Media Attachments')}
-                  <Badge variant="secondary" className="ml-2">
-                    {t('campaigns.builder.content.optional', 'Optional')}
-                  </Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <Label htmlFor="messageType">{t('campaigns.builder.content.message_type_label', 'Message Type')}</Label>
-                  <Select
-                    value={campaignData.messageType}
-                    onValueChange={(value: any) => {
-                      setCampaignData(prev => ({ ...prev, messageType: value, mediaUrls: [] }));
-                      setMediaFiles([]);
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={t('campaigns.builder.content.message_type_placeholder', 'Select message type')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={WHATSAPP_MESSAGE_TYPES.TEXT}>
-                        <div className="flex items-center gap-2">
-                          <MessageSquare className="w-4 h-4" />
-                          <div>
-                            <div>{t('campaigns.builder.content.type_text', 'Text Only')}</div>
-                            <div className="text-xs text-muted-foreground">
-                              {t('campaigns.builder.content.text_desc', 'Plain text messages - supported on all channels')}
-                            </div>
-                          </div>
-                        </div>
-                      </SelectItem>
-                      <SelectItem value={WHATSAPP_MESSAGE_TYPES.IMAGE}>
-                        <div className="flex items-center gap-2">
-                          <Image className="w-4 h-4" />
-                          <div>
-                            <div className="flex items-center gap-1">
-                              {t('campaigns.builder.content.type_image', 'Image')}
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL && (
-                                <Badge variant="outline" className="text-xs">Limited</Badge>
-                              )}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
-                                ? t('campaigns.builder.content.image_desc_official', 'JPEG, PNG, WebP - Full support')
-                                : t('campaigns.builder.content.image_desc_unofficial', 'JPEG, PNG only - May trigger restrictions')
-                              }
-                            </div>
-                          </div>
-                        </div>
-                      </SelectItem>
-                      <SelectItem value={WHATSAPP_MESSAGE_TYPES.VIDEO}>
-                        <div className="flex items-center gap-2">
-                          <Video className="w-4 h-4" />
-                          <div>
-                            <div className="flex items-center gap-1">
-                              {t('campaigns.builder.content.type_video', 'Video')}
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL && (
-                                <Badge variant="outline" className="text-xs">High Risk</Badge>
-                              )}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
-                                ? t('campaigns.builder.content.video_desc_official', 'MP4, 3GPP - Full support')
-                                : t('campaigns.builder.content.video_desc_unofficial', 'MP4 only - High ban risk')
-                              }
-                            </div>
-                          </div>
-                        </div>
-                      </SelectItem>
-                      <SelectItem value={WHATSAPP_MESSAGE_TYPES.AUDIO}>
-                        <div className="flex items-center gap-2">
-                          <Music className="w-4 h-4" />
-                          <div>
-                            <div className="flex items-center gap-1">
-                              {t('campaigns.builder.content.type_audio', 'Audio')}
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL && (
-                                <Badge variant="outline" className="text-xs">Limited</Badge>
-                              )}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
-                                ? t('campaigns.builder.content.audio_desc_official', 'AAC, MP4, MPEG, AMR, OGG')
-                                : t('campaigns.builder.content.audio_desc_unofficial', 'MP3, AAC only - Limited support')
-                              }
-                            </div>
-                          </div>
-                        </div>
-                      </SelectItem>
-                      <SelectItem value={WHATSAPP_MESSAGE_TYPES.DOCUMENT}>
-                        <div className="flex items-center gap-2">
-                          <File className="w-4 h-4" />
-                          <div>
-                            <div className="flex items-center gap-1">
-                              {t('campaigns.builder.content.type_document', 'Document')}
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL && (
-                                <Badge variant="outline" className="text-xs">Moderate Risk</Badge>
-                              )}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL
-                                ? t('campaigns.builder.content.document_desc_official', 'PDF, DOC, XLS, TXT - Full support')
-                                : t('campaigns.builder.content.document_desc_unofficial', 'PDF, TXT only - Moderate risk')
-                              }
-                            </div>
-                          </div>
-                        </div>
-                      </SelectItem>
-                      {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.OFFICIAL && (
-                        <>
-                          <SelectItem value={WHATSAPP_MESSAGE_TYPES.LOCATION}>
-                            <div className="flex items-center gap-2">
-                              <MapPin className="w-4 h-4" />
-                              <div>
-                                <div className="flex items-center gap-1">
-                                  {t('campaigns.builder.content.type_location', 'Location')}
-                                  <Badge variant="default" className="text-xs">Official Only</Badge>
-                                </div>
-                                <div className="text-xs text-muted-foreground">
-                                  {t('campaigns.builder.content.location_desc', 'Share location coordinates')}
-                                </div>
-                              </div>
-                            </div>
-                          </SelectItem>
-                          <SelectItem value={WHATSAPP_MESSAGE_TYPES.CONTACT}>
-                            <div className="flex items-center gap-2">
-                              <User className="w-4 h-4" />
-                              <div>
-                                <div className="flex items-center gap-1">
-                                  {t('campaigns.builder.content.type_contact', 'Contact')}
-                                  <Badge variant="default" className="text-xs">Official Only</Badge>
-                                </div>
-                                <div className="text-xs text-muted-foreground">
-                                  {t('campaigns.builder.content.contact_desc', 'Share contact information')}
-                                </div>
-                              </div>
-                            </div>
-                          </SelectItem>
-                          <SelectItem value={WHATSAPP_MESSAGE_TYPES.TEMPLATE}>
-                            <div className="flex items-center gap-2">
-                              <FileText className="w-4 h-4" />
-                              <div>
-                                <div className="flex items-center gap-1">
-                                  {t('campaigns.builder.content.type_template', 'Template Message')}
-                                  <Badge variant="default" className="text-xs">Official Only</Badge>
-                                </div>
-                                <div className="text-xs text-muted-foreground">
-                                  {t('campaigns.builder.content.template_desc', 'Pre-approved message templates')}
-                                </div>
-                              </div>
-                            </div>
-                          </SelectItem>
-                        </>
-                      )}
-                    </SelectContent>
-                  </Select>
-
-                  {/* Channel-specific message type warnings */}
-                  {campaignData.whatsappChannelType === WHATSAPP_CHANNEL_TYPES.UNOFFICIAL &&
-                   campaignData.messageType !== WHATSAPP_MESSAGE_TYPES.TEXT && (
-                    <div className="mt-2 p-3 bg-orange-50 border border-orange-200 rounded-lg">
-                      <div className="flex items-start gap-2">
-                        <AlertTriangle className="w-4 h-4 text-orange-600 mt-0.5" />
-                        <div className="text-sm">
-                          <div className="font-medium text-orange-800 mb-1">
-                            {t('campaigns.builder.content.unofficial_media_warning', 'Unofficial Channel Media Warning')}
-                          </div>
-                          <div className="text-orange-700">
-                            {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.VIDEO && (
-                              <p>{t('campaigns.builder.content.video_warning', 'Video messages have high ban risk on unofficial channels. Consider using images or text instead.')}</p>
-                            )}
-                            {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.IMAGE && (
-                              <p>{t('campaigns.builder.content.image_warning', 'Image messages may trigger restrictions. Use sparingly and avoid promotional content.')}</p>
-                            )}
-                            {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.AUDIO && (
-                              <p>{t('campaigns.builder.content.audio_warning', 'Audio messages have limited support and may not work on all devices.')}</p>
-                            )}
-                            {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.DOCUMENT && (
-                              <p>{t('campaigns.builder.content.document_warning', 'Document sharing may trigger spam detection. Ensure files are relevant and expected.')}</p>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Media Upload for non-text messages */}
-                {campaignData.messageType !== WHATSAPP_MESSAGE_TYPES.TEXT && (
-                  <div>
-                    <Label htmlFor="mediaUpload">{t('campaigns.builder.content.media_upload_label', 'Upload Media')}</Label>
-                    <div className="mt-2 border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-                      <div className="space-y-2">
-                        <div className="mx-auto w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
-                          {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.IMAGE && <Image className="w-6 h-6 text-gray-400" />}
-                          {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.VIDEO && <Video className="w-6 h-6 text-gray-400" />}
-                          {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.AUDIO && <Music className="w-6 h-6 text-gray-400" />}
-                          {campaignData.messageType === WHATSAPP_MESSAGE_TYPES.DOCUMENT && <File className="w-6 h-6 text-gray-400" />}
-                        </div>
-                        <div>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={handleChooseFileClick}
-                            disabled={uploadingMedia}
-                          >
-                            {uploadingMedia ? (
-                              <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                {t('campaigns.builder.content.uploading', 'Uploading...')}
-                              </>
-                            ) : (
-                              <>
-                                <Upload className="w-4 h-4 mr-2" />
-                                {t('campaigns.builder.content.upload_button', 'Choose File')}
-                              </>
-                            )}
-                          </Button>
-                          <p className="text-sm text-muted-foreground mt-1">
-                            {getMediaUploadHint(campaignData.messageType)}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Hidden file input */}
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      onChange={handleFileSelect}
-                      className="hidden"
-                      accept={getAcceptTypes(campaignData.messageType)}
-                    />
-
-                    {/* Show selected files */}
-                    {mediaFiles.length > 0 && (
-                      <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <CheckCircle className="w-4 h-4 text-green-600" />
-                            <span className="text-sm font-medium text-green-800">
-                              {t('campaigns.builder.content.file_selected', 'File Selected')}
-                            </span>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => removeMediaFile(0)}
-                            className="text-green-600 hover:text-green-800"
-                          >
-                            <X className="w-4 h-4" />
-                          </Button>
-                        </div>
-                        <div className="mt-2 text-sm text-green-700">
-                          {mediaFiles[0].name} ({(mediaFiles[0].size / (1024 * 1024)).toFixed(2)} MB)
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Media Format Information */}
-                <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
-                  <div className="flex items-start gap-2">
-                    <BadgeInfo className="w-4 h-4 text-gray-600 mt-0.5" />
-                    <div className="text-sm">
-                      <div className="font-medium text-gray-800 mb-1">
-                        {t('campaigns.builder.content.media_limits_title', 'WhatsApp Media Limits')}
-                      </div>
-                      <div className="text-gray-700 space-y-1">
-                        <div>• {t('campaigns.builder.content.image_limits', 'Images: JPEG, PNG, WebP - Max 16MB')}</div>
-                        <div>• {t('campaigns.builder.content.video_limits', 'Videos: MP4, 3GPP - Max 16MB')}</div>
-                        <div>• {t('campaigns.builder.content.audio_limits', 'Audio: AAC, MP4, MPEG, AMR, OGG - Max 16MB')}</div>
-                        <div>• {t('campaigns.builder.content.document_limits', 'Documents: PDF, DOC, XLS, TXT - Max 100MB')}</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+         
 
             {contentValidation && (
               <Card>
@@ -2717,6 +2535,7 @@ export function CampaignBuilder() {
         isOpen={isTemplateModalOpen}
         onClose={() => setIsTemplateModalOpen(false)}
         onTemplateCreated={handleTemplateCreated}
+        whatsappChannelType={campaignData.whatsappChannelType}
       />
 
       {editSegmentId && (

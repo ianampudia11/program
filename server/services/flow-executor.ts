@@ -8,6 +8,7 @@ import {
 import whatsAppService from './channels/whatsapp';
 import instagramService from './channels/instagram';
 import messengerService from './channels/messenger';
+import TikTokService from './channels/tiktok';
 import googleCalendarService from './google-calendar';
 import googleSheetsService from './google-sheets';
 import { dataCaptureService } from './data-capture-service';
@@ -101,6 +102,8 @@ class FlowExecutor extends EventEmitter {
   private activeSessions: Map<string, FlowSessionState> = new Map();
   private sessionTimeouts: Map<string, NodeJS.Timeout> = new Map();
   private processingConversations: Set<string> = new Set(); // Track conversations being processed
+  private processingLocks: Map<string, Promise<void>> = new Map(); // Promise-based locks for race condition prevention
+  private lastAssignmentChangeTime: number = 0;
   private static instance: FlowExecutor;
 
   constructor() {
@@ -109,6 +112,7 @@ class FlowExecutor extends EventEmitter {
     this.setMaxListeners(50);
     this.executionManager = FlowExecutionManager.getInstance();
     this.setupExecutionEventHandlers();
+    this.setupFlowAssignmentEventHandlers();
     this.setupSessionCleanup();
   }
 
@@ -587,6 +591,23 @@ class FlowExecutor extends EventEmitter {
   }
 
   /**
+   * Setup flow assignment event handlers to respond to real-time changes
+   */
+  private setupFlowAssignmentEventHandlers(): void {
+
+    if ((global as any).flowAssignmentEventEmitter) {
+      (global as any).flowAssignmentEventEmitter.on('flowAssignmentStatusChanged', (data: any) => {
+        
+
+
+        this.lastAssignmentChangeTime = Date.now();
+
+
+      });
+    }
+  }
+
+  /**
    * Broadcast execution events to connected WebSocket clients
    */
   private broadcastExecutionEvent(eventType: string, data: any): void {
@@ -647,6 +668,24 @@ class FlowExecutor extends EventEmitter {
             message
           );
 
+        case 'whatsapp_twilio':
+          const whatsAppTwilioService = await import('./channels/whatsapp-twilio');
+          return await whatsAppTwilioService.default.sendMessage(
+            channelConnection.id,
+            channelConnection.userId,
+            contactIdentifier,
+            message
+          );
+
+        case 'whatsapp_360dialog':
+          const whatsApp360DialogService = await import('./channels/whatsapp-360dialog');
+          return await whatsApp360DialogService.default.sendMessage(
+            channelConnection.id,
+            channelConnection.userId,
+            contactIdentifier,
+            message
+          );
+
         case 'instagram':
           return await instagramService.sendMessage(
             channelConnection.id,
@@ -661,6 +700,18 @@ class FlowExecutor extends EventEmitter {
             contactIdentifier,
             message,
             channelConnection.userId
+          );
+
+        case 'tiktok':
+          if (!conversation?.id) {
+            throw new Error('Conversation ID required for TikTok messages');
+          }
+          return await TikTokService.sendAndSaveMessage(
+            channelConnection.id,
+            conversation.id,
+            contactIdentifier,
+            message,
+            'text'
           );
 
         case 'email':
@@ -750,6 +801,30 @@ class FlowExecutor extends EventEmitter {
             isFromBot
           );
 
+        case 'whatsapp_twilio':
+          const whatsAppTwilioService = await import('./channels/whatsapp-twilio');
+          return await whatsAppTwilioService.default.sendMedia(
+            channelConnection.id,
+            channelConnection.userId,
+            contactIdentifier,
+            mediaType,
+            mediaUrl,
+            caption,
+            filename
+          );
+
+        case 'whatsapp_360dialog':
+          const whatsApp360DialogService = await import('./channels/whatsapp-360dialog');
+          return await whatsApp360DialogService.default.sendMedia(
+            channelConnection.id,
+            channelConnection.userId,
+            contactIdentifier,
+            mediaType,
+            mediaUrl,
+            caption,
+            filename
+          );
+
         case 'instagram':
           if (mediaType === 'image' || mediaType === 'video') {
             return await instagramService.sendMedia(
@@ -773,7 +848,22 @@ class FlowExecutor extends EventEmitter {
             messengerMediaType as 'image' | 'video' | 'audio' | 'file'
           );
 
+        case 'tiktok':
+          if (!conversation?.id) {
+            throw new Error('Conversation ID required for TikTok messages');
+          }
 
+          if (mediaType === 'image' || mediaType === 'video') {
+            return await TikTokService.sendAndSaveMessage(
+              channelConnection.id,
+              conversation.id,
+              contactIdentifier,
+              mediaUrl,
+              mediaType
+            );
+          } else {
+            throw new Error(`TikTok does not support ${mediaType} media type`);
+          }
 
         case 'email':
 
@@ -814,13 +904,56 @@ class FlowExecutor extends EventEmitter {
     contact: Contact,
     channelConnection: ChannelConnection
   ): Promise<void> {
+    
+
+
+
+    if (channelConnection.channelType === 'whatsapp_unofficial' || channelConnection.channelType === 'whatsapp') {
+
+      if (conversation.isGroup === true) {
+
+        return;
+      }
+
+
+      if (contact.phone) {
+        const cleanPhone = contact.phone.replace(/[^\d]/g, '');
+
+        if (isWhatsAppGroupChatId(contact.phone)) {
+
+          return;
+        }
+      }
+    }
+
+
 
     const messageKey = `message_${conversation.id}_${message.id}`;
+
+
     if (this.processingConversations.has(messageKey)) {
 
       return;
     }
 
+
+    const existingLock = this.processingLocks.get(messageKey);
+    if (existingLock) {
+
+      await existingLock;
+
+      if (this.processingConversations.has(messageKey)) {
+
+        return;
+      }
+    }
+
+
+    let releaseLock: () => void;
+    const lockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    this.processingLocks.set(messageKey, lockPromise);
     this.processingConversations.add(messageKey);
 
     try {
@@ -844,20 +977,28 @@ class FlowExecutor extends EventEmitter {
 
       const activeSessions = await this.getActiveSessionsForConversation(conversation.id);
 
+
+
       if (activeSessions.length > 0) {
 
         let messageHandled = false;
 
 
         const aiSessions = activeSessions.filter(session => session.aiSessionActive);
+    
+
         if (aiSessions.length > 0) {
 
           const mostRecentAiSession = aiSessions.reduce((latest, current) =>
             current.lastActivityAt > latest.lastActivityAt ? current : latest
           );
 
+
           if (await this.handleAISessionMessage(mostRecentAiSession, message, conversation, contact, channelConnection)) {
+
             messageHandled = true;
+          } else {
+
           }
         }
 
@@ -883,7 +1024,10 @@ class FlowExecutor extends EventEmitter {
 
 
         if (messageHandled) {
+
           return;
+        } else {
+
         }
       }
 
@@ -891,17 +1035,25 @@ class FlowExecutor extends EventEmitter {
 
       for (const execution of waitingExecutions) {
         if (await this.handleUserInputForExecution(execution, message, conversation, contact, channelConnection)) {
+
           return;
         }
       }
 
+
       await this.processNewFlowTriggers(message, conversation, contact, channelConnection);
+
 
     } catch (error) {
       console.error('Error processing flow for incoming message:', error);
     } finally {
 
       this.processingConversations.delete(messageKey);
+      this.processingLocks.delete(messageKey);
+
+      if (releaseLock!) {
+        releaseLock!();
+      }
     }
   }
 
@@ -916,13 +1068,33 @@ class FlowExecutor extends EventEmitter {
     channelConnection: ChannelConnection
   ): Promise<boolean> {
     try {
+   
+
 
       if (!this.isValidIndividualContact(contact)) {
+
         return false;
       }
 
 
+      const flowAssignments = await storage.getFlowAssignments(channelConnection.id);
+      const activeAssignments = flowAssignments.filter(assignment => assignment.isActive);
+      const sessionFlowAssigned = activeAssignments.some(assignment => assignment.flowId === session.flowId);
+
+      if (!sessionFlowAssigned) {
+  
+
+
+        await this.endAISession(session, message, conversation, contact, channelConnection);
+        return false;
+      }
+
+
+
+
       if (!session.aiSessionActive || !session.aiNodeId) {
+        
+
 
         if (session.aiSessionActive && !session.aiNodeId) {
           console.warn(`Inconsistent AI session state for ${session.sessionId}: active but no nodeId`);
@@ -966,7 +1138,58 @@ class FlowExecutor extends EventEmitter {
         return false;
       }
 
-      await this.executeAIAssistantNode(aiNode, message, conversation, contact, channelConnection);
+
+      const context = new FlowExecutionContext();
+      context.setVariable('message', message);
+      context.setVariable('message.content', message.content);
+      context.setVariable('conversation', conversation);
+      context.setVariable('contact', contact);
+      context.setVariable('flow.id', session.flowId);
+      context.setVariable('execution.id', `ai_session_${session.sessionId}_${Date.now()}`);
+
+
+      await this.executeAIAssistantNodeWithContext(aiNode, context, conversation, contact, channelConnection);
+
+
+      if (aiNode.data?.enableTaskExecution) {
+        const triggeredTasks = context.getVariable('ai.triggeredTasks') as string[];
+        if (triggeredTasks && triggeredTasks.length > 0) {
+          
+
+
+          const baseFlow = await storage.getFlow(session.flowId);
+          if (baseFlow) {
+            const flowEdges = typeof baseFlow.edges === 'string' ? JSON.parse(baseFlow.edges) : baseFlow.edges;
+            const outgoingEdges = flowEdges.filter((edge: any) => edge.source === session.aiNodeId);
+
+
+            const taskEdges = outgoingEdges.filter((edge: any) =>
+              triggeredTasks.includes(edge.sourceHandle)
+            );
+
+            if (taskEdges.length > 0) {
+          
+
+
+              const flowEdges = typeof baseFlow.edges === 'string' ? JSON.parse(baseFlow.edges) : baseFlow.edges;
+
+
+              await this.executeConnectedNodesWithSession(
+                session,
+                aiNode,
+                nodes,
+                flowEdges,
+                message,
+                conversation,
+                contact,
+                channelConnection,
+                context,
+                false // skipWaitingCheck
+              );
+            }
+          }
+        }
+      }
 
       await this.updateSession(session.sessionId, {
         lastActivityAt: new Date()
@@ -1086,16 +1309,28 @@ class FlowExecutor extends EventEmitter {
       const stopKeyword = nodeData.stopKeyword || '';
       const exitOutputHandle = nodeData.exitOutputHandle || 'ai-stopped';
 
+ 
+
       if (enableSessionTakeover) {
+
+
 
         session.aiSessionActive = true;
         session.aiNodeId = node.id;
         session.aiStopKeyword = stopKeyword.trim();
         session.aiExitOutputHandle = exitOutputHandle;
 
+
         await this.updateSession(session.sessionId, {
+          aiSessionActive: true,
+          aiNodeId: node.id,
+          aiStopKeyword: stopKeyword.trim(),
+          aiExitOutputHandle: exitOutputHandle,
           lastActivityAt: new Date()
         });
+
+
+      } else {
 
       }
     } catch (error) {
@@ -1139,22 +1374,28 @@ class FlowExecutor extends EventEmitter {
 
       const triggerNode = nodes.find((node: any) => node.id === session.triggerNodeId);
       if (!triggerNode) {
-
         return false;
       }
 
+
+
+      if (triggerNode.data?.conditionType === 'multiple_keywords') {
+
+        if (message.metadata && typeof message.metadata === 'object') {
+          (message.metadata as any).sessionBasedTrigger = true;
+        } else {
+          (message as any).sessionBasedTrigger = true;
+        }
+      }
 
       const triggerData = triggerNode.data || {};
       const enableSessionPersistence = triggerData.enableSessionPersistence !== false;
 
       if (!enableSessionPersistence) {
-
         return false;
       }
 
-
       if (!this.triggerSupportsChannel(triggerNode, channelConnection.channelType)) {
-
         return false;
       }
 
@@ -1375,6 +1616,8 @@ class FlowExecutor extends EventEmitter {
     visitedNodes: Set<string> = new Set(),
     maxDepth: number = 100
   ): Promise<void> {
+    
+
     try {
 
       if (visitedNodes.has(currentNode.id)) {
@@ -1396,6 +1639,11 @@ class FlowExecutor extends EventEmitter {
 
       const newVisitedNodes = new Set(visitedNodes);
       newVisitedNodes.add(currentNode.id);
+
+
+      context.setVariable('currentNode.id', currentNode.id);
+      context.setVariable('currentNode.type', currentNode.type);
+      context.setVariable('currentNode.conditionType', currentNode.data?.conditionType);
 
       if (!skipWaitingCheck) {
         const currentNodeType = NodeTypeUtils.normalizeNodeType(currentNode.type || '', currentNode.data?.label);
@@ -1426,18 +1674,34 @@ class FlowExecutor extends EventEmitter {
       const outgoingEdges = edges.filter((edge: any) => edge.source === currentNode.id);
 
       if (outgoingEdges.length === 0) {
-        await this.updateSession(session.sessionId, {
-          status: 'completed',
-          currentNodeId: null
-        });
 
-        this.emit('sessionCompleted', {
-          sessionId: session.sessionId,
-          flowId: session.flowId,
-          conversationId: session.conversationId
-        });
+        const triggerNode = allNodes.find((node: any) => node.id === session.triggerNodeId);
+        const isSessionBasedTrigger = triggerNode?.data?.enableSessionPersistence === true;
 
-        return;
+        if (isSessionBasedTrigger) {
+
+
+          await this.updateSession(session.sessionId, {
+            status: 'active',
+            currentNodeId: session.triggerNodeId,
+            lastActivityAt: new Date()
+          });
+          return;
+        } else {
+
+          await this.updateSession(session.sessionId, {
+            status: 'completed',
+            currentNodeId: null
+          });
+
+          this.emit('sessionCompleted', {
+            sessionId: session.sessionId,
+            flowId: session.flowId,
+            conversationId: session.conversationId
+          });
+
+          return;
+        }
       }
 
       const nodeType = currentNode.type || '';
@@ -1479,10 +1743,24 @@ class FlowExecutor extends EventEmitter {
         }
       } else if (nodeType === 'trigger' && currentNode.data?.conditionType === 'multiple_keywords') {
 
+
+
+        const isSessionBasedTrigger = (message.metadata as any)?.sessionBasedTrigger || (message as any).sessionBasedTrigger;
         const matchedKeyword = (message.metadata as any)?.matchedKeyword || (message as any).matchedKeyword;
-        if (matchedKeyword) {
+
+
+
+        if (isSessionBasedTrigger) {
+
+
+          const defaultEdges = outgoingEdges.filter((edge: any) => !edge.sourceHandle || edge.sourceHandle === 'default');
+          edgesToExecute = defaultEdges.length > 0 ? defaultEdges : outgoingEdges;
+          
+        } else if (matchedKeyword) {
+
           const keywordHandleId = `keyword-${matchedKeyword.toLowerCase().replace(/\s+/g, '-')}`;
           const keywordEdges = outgoingEdges.filter((edge: any) => edge.sourceHandle === keywordHandleId);
+
 
           if (keywordEdges.length > 0) {
             edgesToExecute = keywordEdges;
@@ -1491,8 +1769,10 @@ class FlowExecutor extends EventEmitter {
 
             const defaultEdges = outgoingEdges.filter((edge: any) => !edge.sourceHandle || edge.sourceHandle === 'default');
             edgesToExecute = defaultEdges.length > 0 ? defaultEdges : outgoingEdges;
-
+            
           }
+        } else {
+
         }
       } else if (currentNodeType === NodeType.MESSAGE && currentNode.data?.enableKeywordTriggers) {
 
@@ -1643,7 +1923,45 @@ class FlowExecutor extends EventEmitter {
 
           edgesToExecute = [];
         }
+      } else if (currentNodeType === NodeType.WHATSAPP_INTERACTIVE_BUTTONS) {
+
+        const selectedButtonPayload = context.getVariable('selectedButtonPayload');
+
+  
+
+        if (selectedButtonPayload) {
+
+          const selectedEdges = outgoingEdges.filter((edge: any) => {
+            return edge.sourceHandle === selectedButtonPayload;
+          });
+
+
+
+          edgesToExecute = selectedEdges;
+        } else {
+
+          edgesToExecute = [];
+        }
+      } else if (currentNodeType === NodeType.WHATSAPP_INTERACTIVE_LIST) {
+
+        const selectedListPayload = context.getVariable('selectedListPayload');
+
+
+        if (selectedListPayload) {
+
+          const selectedEdges = outgoingEdges.filter((edge: any) => {
+            return edge.sourceHandle === selectedListPayload;
+          });
+
+
+          edgesToExecute = selectedEdges;
+        } else {
+
+          edgesToExecute = [];
+        }
       }
+
+ 
 
       for (const edge of edgesToExecute) {
         const targetNode = allNodes.find((node: any) => node.id === edge.target);
@@ -1652,7 +1970,10 @@ class FlowExecutor extends EventEmitter {
           continue;
         }
 
+        
+
         const shouldTraverse = await this.evaluateEdgeCondition(edge, context);
+
 
         if (shouldTraverse) {
           session.executionPath.push(targetNode.id);
@@ -1697,6 +2018,9 @@ class FlowExecutor extends EventEmitter {
     switch (nodeType) {
       case NodeType.QUICK_REPLY:
       case NodeType.WHATSAPP_POLL:
+      case NodeType.WHATSAPP_INTERACTIVE_BUTTONS:
+      case NodeType.WHATSAPP_INTERACTIVE_LIST:
+      case NodeType.WHATSAPP_LOCATION_REQUEST:
       case NodeType.INPUT:
         return true;
       case NodeType.MESSAGE:
@@ -1776,6 +2100,18 @@ class FlowExecutor extends EventEmitter {
           await this.executeWhatsAppInteractiveButtonsNodeWithContext(node, context, conversation, contact, channelConnection);
           break;
 
+        case NodeType.WHATSAPP_INTERACTIVE_LIST:
+          await this.executeWhatsAppInteractiveListNodeWithContext(node, context, conversation, contact, channelConnection);
+          break;
+
+        case NodeType.WHATSAPP_CTA_URL:
+          await this.executeWhatsAppCTAURLNodeWithContext(node, context, conversation, contact, channelConnection);
+          break;
+
+        case NodeType.WHATSAPP_LOCATION_REQUEST:
+          await this.executeWhatsAppLocationRequestNodeWithContext(node, context, conversation, contact, channelConnection);
+          break;
+
         case NodeType.FOLLOW_UP:
           await this.executeFollowUpNodeWithContext(node, context, conversation, contact, channelConnection);
           break;
@@ -1791,6 +2127,16 @@ class FlowExecutor extends EventEmitter {
         case NodeType.AI_ASSISTANT:
           await this.executeAIAssistantNodeWithContext(node, context, conversation, contact, channelConnection);
           await this.activateAISessionIfConfigured(session, node, context);
+
+
+          if (node.data?.enableTaskExecution) {
+            const triggeredTasks = context.getVariable('ai.triggeredTasks') as string[];
+            if (triggeredTasks && triggeredTasks.length > 0) {
+              
+
+              break;
+            }
+          }
 
           if (session.aiSessionActive) {
 
@@ -1965,6 +2311,10 @@ class FlowExecutor extends EventEmitter {
         return 'whatsapp_poll';
       case NodeType.WHATSAPP_INTERACTIVE_BUTTONS:
         return 'whatsapp_interactive_button';
+      case NodeType.WHATSAPP_INTERACTIVE_LIST:
+        return 'whatsapp_interactive_list';
+      case NodeType.WHATSAPP_LOCATION_REQUEST:
+        return 'location';
       case NodeType.MESSAGE:
         return node.data?.enableKeywordTriggers ? 'message_keyword' : 'text';
       case NodeType.IMAGE:
@@ -1988,14 +2338,54 @@ class FlowExecutor extends EventEmitter {
    * Evaluate edge condition
    */
   private async evaluateEdgeCondition(edge: any, context: FlowExecutionContext): Promise<boolean> {
+
+
     try {
       if (edge.sourceHandle && edge.sourceHandle.startsWith('option-')) {
+
         return this.evaluateQuickReplyEdge(edge, context);
       }
 
 
       if (edge.sourceHandle && edge.sourceHandle.startsWith('keyword-')) {
-        return this.evaluateMessageNodeKeywordEdge(edge, context);
+
+
+
+        const message = context.getVariable('message') as any;
+        const triggerMatchedKeyword = message?.metadata?.matchedKeyword || message?.matchedKeyword;
+        const isSessionBasedTrigger = message?.metadata?.sessionBasedTrigger || message?.sessionBasedTrigger;
+
+
+
+
+        if (isSessionBasedTrigger) {
+
+          return true;
+        }
+
+        if (triggerMatchedKeyword) {
+
+          const keywordHandleId = `keyword-${triggerMatchedKeyword.toLowerCase().replace(/\s+/g, '-')}`;
+          const result = edge.sourceHandle === keywordHandleId;
+
+          return result;
+        } else {
+
+          const currentNodeId = context.getVariable('currentNode.id');
+          const currentNodeType = context.getVariable('currentNode.type');
+          const currentNodeCondition = context.getVariable('currentNode.conditionType');
+
+          
+
+          if (currentNodeType === 'trigger' && currentNodeCondition === 'any') {
+
+            return true;
+          }
+
+
+
+          return this.evaluateMessageNodeKeywordEdge(edge, context);
+        }
       }
 
 
@@ -2204,15 +2594,23 @@ class FlowExecutor extends EventEmitter {
     contact: Contact,
     channelConnection: ChannelConnection
   ): Promise<void> {
+    
+
 
     if (!this.isValidIndividualContact(contact)) {
+
       return;
     }
+
+
 
     const flowAssignments = await storage.getFlowAssignments(channelConnection.id);
     const activeAssignments = flowAssignments.filter(assignment => assignment.isActive);
 
+    
+
     if (activeAssignments.length === 0) {
+
       return;
     }
 
@@ -2316,6 +2714,9 @@ class FlowExecutor extends EventEmitter {
 
         case NodeType.WHATSAPP_INTERACTIVE_BUTTONS:
           return this.handleWhatsAppInteractiveButtonsInput(node, message, context);
+
+        case NodeType.WHATSAPP_INTERACTIVE_LIST:
+          return this.handleWhatsAppInteractiveListInput(node, message, context);
 
         case NodeType.MESSAGE:
           return this.handleMessageNodeKeywordInput(node, message, context);
@@ -2640,7 +3041,7 @@ class FlowExecutor extends EventEmitter {
 
 
 
-      const hash = encPayload.slice(-4); // Take last 4 characters for better distribution
+      const hash = encPayload.slice(-4); 
       let hashValue = 0;
 
 
@@ -2653,7 +3054,7 @@ class FlowExecutor extends EventEmitter {
       return selectedIndex;
     } catch (error) {
       console.error('Error in poll vote decryption:', error);
-      return 0; // Default to first option
+      return 0; 
     }
   }
   /**
@@ -2666,7 +3067,20 @@ class FlowExecutor extends EventEmitter {
 
 
 
-      const messageMetadata = message.metadata ? JSON.parse(message.metadata as string) : {};
+
+      let messageMetadata: any = {};
+      if (message.metadata) {
+        if (typeof message.metadata === 'string') {
+          try {
+            messageMetadata = JSON.parse(message.metadata);
+          } catch (error) {
+            console.error('Error parsing message metadata:', error);
+            messageMetadata = {};
+          }
+        } else if (typeof message.metadata === 'object') {
+          messageMetadata = message.metadata;
+        }
+      }
       const isInteractiveResponse = messageMetadata?.messageType === 'interactive' ||
                                    messageMetadata?.type === 'button';
 
@@ -2728,6 +3142,111 @@ class FlowExecutor extends EventEmitter {
       return false;
     } catch (error) {
       console.error('Flow executor: Error handling WhatsApp interactive buttons input:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Handle WhatsApp Interactive List input matching
+   */
+  private handleWhatsAppInteractiveListInput(node: any, message: Message, context: FlowExecutionContext): boolean {
+    try {
+      const sections = node.data?.sections || [];
+      const messageContent = message.content?.toLowerCase() || '';
+
+
+      let messageMetadata: any = {};
+      if (message.metadata) {
+        if (typeof message.metadata === 'string') {
+          try {
+            messageMetadata = JSON.parse(message.metadata);
+          } catch (error) {
+            console.error('Error parsing message metadata:', error);
+            messageMetadata = {};
+          }
+        } else if (typeof message.metadata === 'object') {
+          messageMetadata = message.metadata;
+        }
+      }
+
+      const isInteractiveResponse = messageMetadata?.messageType === 'interactive' ||
+                                   messageMetadata?.type === 'list';
+
+
+      if (isInteractiveResponse && messageMetadata?.list) {
+        const listPayload = messageMetadata.list.payload;
+        const listText = messageMetadata.list.text;
+        const listDescription = messageMetadata.list.description;
+
+
+        let matchedRow = null;
+        let matchedSection = null;
+
+        for (const section of sections) {
+          const foundRow = section.rows?.find((row: any) => row.payload === listPayload);
+          if (foundRow) {
+            matchedRow = foundRow;
+            matchedSection = section;
+            break;
+          }
+        }
+
+        if (matchedRow) {
+          context.setVariable('selectedListItem', matchedRow);
+          context.setVariable('selectedListPayload', listPayload);
+          context.setVariable('selectedListTitle', listText || matchedRow.title);
+          context.setVariable('selectedListDescription', listDescription || matchedRow.description);
+          context.setVariable('selectedListSection', matchedSection);
+
+          const bodyText = context.getVariable('whatsappInteractive.bodyText') || '';
+          const completeMessage = bodyText
+            ? `${bodyText} [User selected: ${listText || matchedRow.title}]`
+            : `[User selected: ${listText || matchedRow.title}]`;
+
+          context.setVariable('message.content', completeMessage);
+          context.setVariable('message.originalContent', message.content);
+          context.setVariable('whatsappInteractive.completeInteraction', completeMessage);
+          context.setVariable('user.input', completeMessage);
+          context.setVariable('user.lastInput', completeMessage);
+          context.setVariable('user.inputType', 'whatsapp_interactive_list');
+
+          return true;
+        }
+      }
+
+
+      for (const section of sections) {
+        for (const row of section.rows || []) {
+          const rowTitle = (row.title || '').toLowerCase();
+          const rowPayload = (row.payload || '').toLowerCase();
+
+          if (messageContent === rowTitle || messageContent === rowPayload) {
+            context.setVariable('selectedListItem', row);
+            context.setVariable('selectedListPayload', row.payload);
+            context.setVariable('selectedListTitle', row.title);
+            context.setVariable('selectedListDescription', row.description);
+            context.setVariable('selectedListSection', section);
+
+            const bodyText = context.getVariable('whatsappInteractive.bodyText') || '';
+            const completeMessage = bodyText
+              ? `${bodyText} [User selected: ${row.title}]`
+              : `[User selected: ${row.title}]`;
+
+            context.setVariable('message.content', completeMessage);
+            context.setVariable('message.originalContent', message.content);
+            context.setVariable('whatsappInteractive.completeInteraction', completeMessage);
+            context.setVariable('user.input', completeMessage);
+            context.setVariable('user.lastInput', completeMessage);
+            context.setVariable('user.inputType', 'whatsapp_interactive_list');
+
+            return true;
+          }
+        }
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Flow executor: Error handling WhatsApp interactive list input:', error);
       return false;
     }
   }
@@ -2840,6 +3359,8 @@ class FlowExecutor extends EventEmitter {
     contact: Contact,
     channelConnection: ChannelConnection
   ): Promise<void> {
+    
+
     try {
       const isBotDisabled = await this.isBotDisabled(conversation.id);
       if (isBotDisabled) {
@@ -2850,9 +3371,11 @@ class FlowExecutor extends EventEmitter {
       const baseFlow = await storage.getFlow(assignment.flowId);
 
       if (!baseFlow) {
-        console.error(`Flow ${assignment.flowId} not found`);
+        console.error(`❌ Flow ${assignment.flowId} not found`);
         return;
       }
+
+
 
       const flow: Flow = { ...baseFlow, definition: (baseFlow as any).definition || null };
 
@@ -2872,11 +3395,15 @@ class FlowExecutor extends EventEmitter {
 
 
       if (triggerNodes.length === 0) {
+
         return;
       }
 
       for (const triggerNode of triggerNodes) {
+        
+
         if (await this.matchesTriggerWithSession(triggerNode, message, conversation, contact, channelConnection)) {
+
           const existingSession = await this.getActiveTriggerSession(triggerNode.id, conversation.id, contact.id);
 
           let sessionId: string;
@@ -2886,6 +3413,15 @@ class FlowExecutor extends EventEmitter {
             sessionId = existingSession.sessionId;
             session = existingSession;
           } else {
+
+            const originalMatchedKeyword = (message.metadata as any)?.matchedKeyword || (message as any).matchedKeyword;
+            const enhancedTriggerData = {
+              ...triggerNode.data,
+              originalMatchedKeyword: originalMatchedKeyword
+            };
+
+
+
             sessionId = await this.createSession(
               flow.id,
               conversation.id,
@@ -2898,7 +3434,7 @@ class FlowExecutor extends EventEmitter {
                 conversation,
                 channelConnection
               },
-              triggerNode.data
+              enhancedTriggerData
             );
             session = this.activeSessions.get(sessionId) || null;
           }
@@ -2937,6 +3473,8 @@ class FlowExecutor extends EventEmitter {
             }
           }
 
+          
+
           await this.executeConnectedNodesWithSession(
             session,
             triggerNode,
@@ -2948,6 +3486,8 @@ class FlowExecutor extends EventEmitter {
             channelConnection,
             context
           );
+
+
 
           const executionId = this.executionManager.startExecution(
             flow.id,
@@ -2997,29 +3537,54 @@ class FlowExecutor extends EventEmitter {
     const data = triggerNode.data || {};
     const enableSessionPersistence = data.enableSessionPersistence !== false;
 
+    
 
     if (!this.triggerSupportsChannel(triggerNode, channelConnection.channelType)) {
+
       return false;
     }
 
     if (!enableSessionPersistence) {
+
       return this.matchesTrigger(triggerNode, message, channelConnection);
     }
+
+    
 
     const existingSession = await this.getActiveTriggerSession(triggerNode.id, conversation.id, contact.id);
 
     if (existingSession) {
+
+
       await this.updateSession(existingSession.sessionId, {
         lastActivityAt: new Date()
       });
+
+
+
+      if (data.conditionType === 'multiple_keywords') {
+
+
+        if (message.metadata && typeof message.metadata === 'object') {
+          (message.metadata as any).sessionBasedTrigger = true;
+        } else {
+          (message as any).sessionBasedTrigger = true;
+        }
+      }
+
       return true;
+    } else {
+
     }
+
 
     const conditionMatches = this.matchesTrigger(triggerNode, message, channelConnection);
 
     if (conditionMatches) {
+
       return true;
     }
+
 
     return false;
   }
@@ -3033,16 +3598,22 @@ class FlowExecutor extends EventEmitter {
     contactId: number
   ): Promise<FlowSessionState | null> {
     try {
+     
+
       for (const [sessionId, session] of Array.from(this.activeSessions.entries())) {
+        
+
         if (session.triggerNodeId === triggerNodeId &&
             session.conversationId === conversationId &&
             session.contactId === contactId &&
             (session.status === 'active' || session.status === 'waiting')) {
 
           if (session.expiresAt && new Date() > session.expiresAt) {
+
             await this.expireSession(sessionId);
             return null;
           }
+
 
           return session;
         }
@@ -3082,6 +3653,8 @@ class FlowExecutor extends EventEmitter {
       const allSupportedChannels = [
         'whatsapp_unofficial',
         'whatsapp_official',
+        'whatsapp_twilio',
+        'whatsapp_360dialog',
         'messenger',
         'instagram',
         'email'
@@ -3111,6 +3684,8 @@ class FlowExecutor extends EventEmitter {
     const conditionType = data.conditionType || data.condition || 'any';
     const conditionValue = data.conditionValue || data.value || '';
     const channelType = channelConnection?.channelType || 'whatsapp_unofficial';
+
+    
 
 
     if (!this.isConditionSupportedByChannel(conditionType, channelType)) {
@@ -3146,6 +3721,7 @@ class FlowExecutor extends EventEmitter {
 
 
     if (condition === 'multiple_keywords') {
+
       const matchedKeyword = this.matchesMultipleKeywordsCondition(triggerNode, message);
       if (matchedKeyword) {
 
@@ -3156,6 +3732,7 @@ class FlowExecutor extends EventEmitter {
         }
         return true;
       }
+
       return false;
     }
 
@@ -3190,6 +3767,8 @@ class FlowExecutor extends EventEmitter {
       const mediaChannels = [
         'whatsapp_unofficial',
         'whatsapp_official',
+        'whatsapp_twilio',
+        'whatsapp_360dialog',
         'messenger',
         'instagram'
       ];
@@ -3205,7 +3784,10 @@ class FlowExecutor extends EventEmitter {
 
     const whatsappConditions = ['poll_response', 'button_click'];
     if (whatsappConditions.includes(condition)) {
-      return channelType === 'whatsapp_unofficial' || channelType === 'whatsapp_official';
+      return channelType === 'whatsapp_unofficial' ||
+             channelType === 'whatsapp_official' ||
+             channelType === 'whatsapp_twilio' ||
+             channelType === 'whatsapp_360dialog';
     }
 
 
@@ -3282,6 +3864,7 @@ class FlowExecutor extends EventEmitter {
     const caseSensitive = data.keywordsCaseSensitive || false;
 
 
+
     if (!keywordsArray || keywordsArray.length === 0) {
       const multipleKeywords = data.multipleKeywords || '';
       if (multipleKeywords) {
@@ -3289,12 +3872,12 @@ class FlowExecutor extends EventEmitter {
           .split(',')
           .map((keyword: string) => keyword.trim())
           .filter((keyword: string) => keyword.length > 0);
+
       }
     }
 
-
     if (!keywordsArray || keywordsArray.length === 0) {
-      console.warn('Multiple keywords condition has no keywords to match against');
+      console.warn('❌ Multiple keywords condition has no keywords to match against');
       return null;
     }
 
@@ -3305,17 +3888,17 @@ class FlowExecutor extends EventEmitter {
 
     const messageContent = caseSensitive ? message.content : message.content.toLowerCase();
 
-
     for (const keyword of keywordsArray) {
       if (!keyword || typeof keyword !== 'string') {
         continue;
       }
       const searchKeyword = caseSensitive ? keyword.trim() : keyword.trim().toLowerCase();
-      if (searchKeyword.length > 0 && messageContent.includes(searchKeyword)) {
+      const matches = searchKeyword.length > 0 && messageContent.includes(searchKeyword);
+
+      if (matches) {
         return keyword.trim(); // Return the original keyword
       }
     }
-
     return null;
   }
 
@@ -3468,6 +4051,10 @@ class FlowExecutor extends EventEmitter {
                                            nodeType === 'whatsappInteractiveButtons' ||
                                            nodeLabel === 'WhatsApp Interactive Buttons';
 
+    const isWhatsAppInteractiveListNode = nodeType === 'whatsapp_interactive_list' ||
+                                         nodeType === 'whatsappInteractiveList' ||
+                                         nodeLabel === 'WhatsApp Interactive List';
+
     let edgesToExecute = connectedEdges;
 
     if (isConditionNode) {
@@ -3525,6 +4112,20 @@ class FlowExecutor extends EventEmitter {
 
         const selectedEdges = connectedEdges.filter((edge: any) => {
           return edge.sourceHandle === selectedButtonPayload;
+        });
+
+        edgesToExecute = selectedEdges;
+      } else {
+
+        edgesToExecute = [];
+      }
+    } else if (isWhatsAppInteractiveListNode) {
+      const selectedListPayload = execution.context.getVariable('selectedListPayload');
+
+      if (selectedListPayload) {
+
+        const selectedEdges = connectedEdges.filter((edge: any) => {
+          return edge.sourceHandle === selectedListPayload;
         });
 
         edgesToExecute = selectedEdges;
@@ -3911,6 +4512,33 @@ class FlowExecutor extends EventEmitter {
       }
 
       else if (
+        nodeType === 'whatsapp_interactive_list' ||
+        nodeType === 'whatsappInteractiveList' ||
+        nodeLabel === 'WhatsApp Interactive List'
+      ) {
+        await this.executeWhatsAppInteractiveListNodeWithContext(node, execution.context, conversation, contact, channelConnection);
+        return { success: true, shouldContinue: false, waitForUserInput: true };
+      }
+
+      else if (
+        nodeType === 'whatsapp_cta_url' ||
+        nodeType === 'whatsappCTAURL' ||
+        nodeLabel === 'WhatsApp CTA URL'
+      ) {
+        await this.executeWhatsAppCTAURLNodeWithContext(node, execution.context, conversation, contact, channelConnection);
+        return { success: true, shouldContinue: true, waitForUserInput: false };
+      }
+
+      else if (
+        nodeType === 'whatsapp_location_request' ||
+        nodeType === 'whatsappLocationRequest' ||
+        nodeLabel === 'WhatsApp Location Request'
+      ) {
+        await this.executeWhatsAppLocationRequestNodeWithContext(node, execution.context, conversation, contact, channelConnection);
+        return { success: true, shouldContinue: true, waitForUserInput: true };
+      }
+
+      else if (
         nodeType === 'followUpNode' ||
         nodeType === 'follow_up' ||
         nodeType === 'followup' ||
@@ -4260,11 +4888,38 @@ class FlowExecutor extends EventEmitter {
         mediaUrl = data.mediaUrl || data.url || '';
         content = data.caption || '';
         content = context.replaceVariables(content);
+
+
+        if (mediaUrl && !mediaUrl.startsWith('http://') && !mediaUrl.startsWith('https://')) {
+
+
+          const basePort = parseInt(process.env.PORT || "9000", 10);
+          const port = process.env.NODE_ENV === 'development' ? basePort + 100 : basePort;
+          const baseUrl = process.env.NODE_ENV === 'production'
+            ? (process.env.BASE_URL || `http://localhost:${port}`)
+            : `http://localhost:${port}`;
+
+          if (mediaUrl.startsWith('/')) {
+            mediaUrl = `${baseUrl}${mediaUrl}`;
+          } else {
+            mediaUrl = `${baseUrl}/${mediaUrl}`;
+          }
+        }
+
+
+        
+
+
+        if (!mediaUrl || (!mediaUrl.startsWith('http://') && !mediaUrl.startsWith('https://'))) {
+          throw new Error(`Invalid media URL for ${messageType} node: "${mediaUrl}". Media URL must be a valid HTTP/HTTPS URL.`);
+        }
       }
 
 
       try {
         if (messageType === 'text') {
+     
+
           await this.sendMessageThroughChannel(
             channelConnection,
             contact,
@@ -4272,7 +4927,11 @@ class FlowExecutor extends EventEmitter {
             conversation,
             true
           );
+
+
         } else {
+          
+
           await this.sendMediaThroughChannel(
             channelConnection,
             contact,
@@ -4283,9 +4942,17 @@ class FlowExecutor extends EventEmitter {
             conversation,
             true
           );
+
+
         }
       } catch (channelError) {
-        console.error('Error sending through channel:', channelError);
+        const error = channelError as Error;
+        console.error(`❌ Error sending ${messageType} through ${channelConnection.channelType}:`, {
+          nodeId: node.id,
+          error: error.message,
+          stack: error.stack,
+          mediaUrl: messageType !== 'text' ? mediaUrl : undefined
+        });
 
 
         const insertMessage = {
@@ -4522,8 +5189,9 @@ class FlowExecutor extends EventEmitter {
     channelConnection: ChannelConnection
   ): Promise<void> {
     try {
-      const data = node.data || {};
+      
 
+      const data = node.data || {};
 
       if (channelConnection.channelType !== 'whatsapp_official') {
         console.warn('WhatsApp Interactive Buttons node can only be used with Official WhatsApp API connections');
@@ -4592,8 +5260,11 @@ class FlowExecutor extends EventEmitter {
       context.setVariable('waitingForInteractiveResponse', true);
 
       try {
+        
 
         await this.sendWhatsAppInteractiveMessage(channelConnection, interactiveMessage, conversation);
+
+
       } catch (channelError) {
         console.error('Error sending WhatsApp interactive message, falling back to text:', channelError);
 
@@ -4608,6 +5279,314 @@ class FlowExecutor extends EventEmitter {
 
     } catch (error) {
       console.error('Error executing WhatsApp Interactive Buttons node:', error);
+    }
+  }
+
+  /**
+   * Execute WhatsApp Interactive List node with execution context
+   */
+  private async executeWhatsAppInteractiveListNodeWithContext(
+    node: any,
+    context: FlowExecutionContext,
+    conversation: Conversation,
+    contact: Contact,
+    channelConnection: ChannelConnection
+  ): Promise<void> {
+    try {
+      
+
+      const data = node.data || {};
+
+      if (channelConnection.channelType !== 'whatsapp_official') {
+        console.warn('WhatsApp Interactive List node can only be used with Official WhatsApp API connections');
+
+        const fallbackMessage = context.replaceVariables(data.bodyText || 'Please select an option:');
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+        return;
+      }
+
+      const headerText = data.headerText ? context.replaceVariables(data.headerText) : undefined;
+      const bodyText = context.replaceVariables(data.bodyText || 'Please select an option:');
+      const footerText = data.footerText ? context.replaceVariables(data.footerText) : undefined;
+      const buttonText = context.replaceVariables(data.buttonText || 'View Options');
+      const sections = data.sections || [];
+
+
+      const validSections = sections
+        .filter((section: any) => section.title && section.rows && section.rows.length > 0)
+        .slice(0, 10) // WhatsApp API limit
+        .map((section: any) => ({
+          title: section.title.substring(0, 24), // WhatsApp API limit
+          rows: section.rows
+            .filter((row: any) => row.title && row.payload)
+            .slice(0, 10) // WhatsApp API limit per section
+            .map((row: any) => ({
+              id: row.payload,
+              title: row.title.substring(0, 24), // WhatsApp API limit
+              ...(row.description && { description: row.description.substring(0, 72) }) // WhatsApp API limit
+            }))
+        }))
+        .filter((section: any) => section.rows.length > 0);
+
+
+      const totalRows = validSections.reduce((total: number, section: any) => total + section.rows.length, 0);
+      if (totalRows > 10) {
+
+        let remainingRows = 10;
+        const trimmedSections = [];
+        for (const section of validSections) {
+          if (remainingRows <= 0) break;
+          const rowsToTake = Math.min(section.rows.length, remainingRows);
+          trimmedSections.push({
+            ...section,
+            rows: section.rows.slice(0, rowsToTake)
+          });
+          remainingRows -= rowsToTake;
+        }
+        validSections.splice(0, validSections.length, ...trimmedSections);
+      }
+
+      if (validSections.length === 0) {
+        console.warn('No valid sections found for WhatsApp Interactive List node');
+        await this.sendMessageThroughChannel(channelConnection, contact, bodyText, conversation, true);
+        return;
+      }
+
+      const interactiveMessage = {
+        messaging_product: 'whatsapp',
+        to: contact.phone,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          ...(headerText && {
+            header: {
+              type: 'text',
+              text: headerText
+            }
+          }),
+          body: {
+            text: bodyText
+          },
+          ...(footerText && {
+            footer: {
+              text: footerText
+            }
+          }),
+          action: {
+            button: buttonText,
+            sections: validSections
+          }
+        }
+      };
+
+
+      context.setVariable('whatsappInteractive.headerText', headerText);
+      context.setVariable('whatsappInteractive.bodyText', bodyText);
+      context.setVariable('whatsappInteractive.footerText', footerText);
+      context.setVariable('whatsappInteractive.buttonText', buttonText);
+      context.setVariable('whatsappInteractive.sections', validSections);
+      context.setVariable('waitingForInteractiveResponse', true);
+
+      try {
+   
+
+        await this.sendWhatsAppInteractiveMessage(channelConnection, interactiveMessage, conversation);
+
+
+      } catch (channelError) {
+        console.error('Error sending WhatsApp interactive list message, falling back to text:', channelError);
+
+
+        let fallbackMessage = bodyText + '\n\n';
+        let optionNumber = 1;
+        validSections.forEach((section: any) => {
+          fallbackMessage += `${section.title}:\n`;
+          section.rows.forEach((row: any) => {
+            fallbackMessage += `${optionNumber}. ${row.title}`;
+            if (row.description) {
+              fallbackMessage += ` - ${row.description}`;
+            }
+            fallbackMessage += '\n';
+            optionNumber++;
+          });
+          fallbackMessage += '\n';
+        });
+
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+      }
+
+    } catch (error) {
+      console.error('Error executing WhatsApp Interactive List node:', error);
+    }
+  }
+
+  /**
+   * Execute WhatsApp CTA URL node with execution context
+   */
+  private async executeWhatsAppCTAURLNodeWithContext(
+    node: any,
+    context: FlowExecutionContext,
+    conversation: Conversation,
+    contact: Contact,
+    channelConnection: ChannelConnection
+  ): Promise<void> {
+    try {
+      
+
+      const data = node.data || {};
+
+      if (channelConnection.channelType !== 'whatsapp_official') {
+        console.warn('WhatsApp CTA URL node can only be used with Official WhatsApp API connections');
+
+        const fallbackMessage = context.replaceVariables(data.bodyText || 'Click the link: ' + (data.url || 'https://example.com'));
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+        return;
+      }
+
+      const headerText = data.headerText ? context.replaceVariables(data.headerText) : undefined;
+      const bodyText = context.replaceVariables(data.bodyText || 'Click the button below to visit our website.');
+      const footerText = data.footerText ? context.replaceVariables(data.footerText) : undefined;
+      const displayText = context.replaceVariables(data.displayText || 'Visit Website');
+      const url = context.replaceVariables(data.url || 'https://example.com');
+
+
+      try {
+        new URL(url);
+      } catch (urlError) {
+        console.error('Invalid URL provided for WhatsApp CTA URL node:', url);
+        const fallbackMessage = bodyText + '\n\n' + url;
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+        return;
+      }
+
+
+      if (new Blob([displayText]).size > 20) {
+        console.warn('Display text exceeds 20 bytes limit, truncating:', displayText);
+      }
+
+      const interactiveMessage = {
+        messaging_product: 'whatsapp',
+        to: contact.phone,
+        type: 'interactive',
+        interactive: {
+          type: 'cta_url',
+          ...(headerText && {
+            header: {
+              type: 'text',
+              text: headerText
+            }
+          }),
+          body: {
+            text: bodyText
+          },
+          ...(footerText && {
+            footer: {
+              text: footerText
+            }
+          }),
+          action: {
+            name: 'cta_url',
+            parameters: {
+              display_text: displayText.substring(0, 20), // Ensure 20 byte limit
+              url: url
+            }
+          }
+        }
+      };
+
+
+      context.setVariable('whatsappCTAURL.headerText', headerText);
+      context.setVariable('whatsappCTAURL.bodyText', bodyText);
+      context.setVariable('whatsappCTAURL.footerText', footerText);
+      context.setVariable('whatsappCTAURL.displayText', displayText);
+      context.setVariable('whatsappCTAURL.url', url);
+
+      try {
+        
+
+        await this.sendWhatsAppInteractiveMessage(channelConnection, interactiveMessage, conversation);
+
+
+      } catch (channelError) {
+        console.error('Error sending WhatsApp CTA URL message, falling back to text:', channelError);
+
+
+        let fallbackMessage = bodyText + '\n\n';
+        fallbackMessage += `${displayText}: ${url}`;
+
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+      }
+
+    } catch (error) {
+      console.error('Error executing WhatsApp CTA URL node:', error);
+    }
+  }
+
+  /**
+   * Execute WhatsApp Location Request node with execution context
+   */
+  private async executeWhatsAppLocationRequestNodeWithContext(
+    node: any,
+    context: FlowExecutionContext,
+    conversation: Conversation,
+    contact: Contact,
+    channelConnection: ChannelConnection
+  ): Promise<void> {
+    try {
+      
+
+      const data = node.data || {};
+
+      if (channelConnection.channelType !== 'whatsapp_official') {
+        console.warn('WhatsApp Location Request node can only be used with Official WhatsApp API connections');
+
+        const fallbackMessage = context.replaceVariables(data.bodyText || 'Please share your location so we can assist you better.');
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+        return;
+      }
+
+      const bodyText = context.replaceVariables(data.bodyText || 'Please share your location so we can assist you better.');
+
+
+      if (bodyText.length > 1024) {
+        console.warn('Body text exceeds 1024 characters limit, truncating:', bodyText.length);
+      }
+
+      const interactiveMessage = {
+        messaging_product: 'whatsapp',
+        to: contact.phone,
+        type: 'interactive',
+        interactive: {
+          type: 'location_request_message',
+          body: {
+            text: bodyText.substring(0, 1024) // Ensure 1024 character limit
+          },
+          action: {
+            name: 'send_location'
+          }
+        }
+      };
+
+
+      context.setVariable('whatsappLocationRequest.bodyText', bodyText);
+
+      try {
+    
+
+        await this.sendWhatsAppInteractiveMessage(channelConnection, interactiveMessage, conversation);
+
+
+      } catch (channelError) {
+        console.error('Error sending WhatsApp Location Request message, falling back to text:', channelError);
+
+
+        const fallbackMessage = bodyText + '\n\n' + 'Please share your location.';
+
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+      }
+
+    } catch (error) {
+      console.error('Error executing WhatsApp Location Request node:', error);
     }
   }
 
@@ -4946,6 +5925,7 @@ class FlowExecutor extends EventEmitter {
             conversationHistory = await storage.getMessagesByConversation(conversation.id);
           }
 
+          const language = data.language || 'en';
           const aiConfig = {
             provider,
             model,
@@ -4964,9 +5944,13 @@ class FlowExecutor extends EventEmitter {
             enableTaskExecution: data.enableTaskExecution || false,
             tasks: data.tasks || [],
 
+            enableMCPServers: data.enableMCPServers || false,
+            mcpServers: data.mcpServers || [],
+
             nodeId: node.id,
             knowledgeBaseEnabled: data.knowledgeBaseEnabled || false,
-            knowledgeBaseConfig: data.knowledgeBaseConfig || {}
+            knowledgeBaseConfig: data.knowledgeBaseConfig || {},
+            language
           };
 
           const aiResponse = await aiAssistantService.processMessage(
@@ -4982,11 +5966,10 @@ class FlowExecutor extends EventEmitter {
           if (aiResponse.text) {
             const responseText = this.replaceVariables(aiResponse.text, tempMessage, contact);
 
-            if (aiResponse.audioUrl && (channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
+            if (aiResponse.audioUrl && (channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial' || channelConnection.channelType === 'whatsapp_official') && contact.identifier) {
               try {
                 const audioPath = aiResponse.audioUrl.startsWith('/') ? aiResponse.audioUrl.slice(1) : aiResponse.audioUrl;
                 const fullAudioPath = path.join(process.cwd(), audioPath);
-
 
 
                 if (channelConnection.channelType === 'whatsapp_unofficial') {
@@ -4998,72 +5981,40 @@ class FlowExecutor extends EventEmitter {
                   );
                 } else {
 
-                  await whatsAppService.sendWhatsAppMessage(
-                    channelConnection.id,
-                    channelConnection.userId,
-                    contact.identifier,
+                  await this.sendMessageThroughChannel(
+                    channelConnection,
+                    contact,
                     responseText,
+                    conversation,
                     true
                   );
                 }
               } catch (error) {
                 try {
-                  if (channelConnection.channelType === 'whatsapp_unofficial') {
-                    await whatsAppService.sendMessage(
-                      channelConnection.id,
-                      channelConnection.userId,
-                      contact.identifier,
-                      responseText,
-                      true
-                    );
-                  } else {
-                    await whatsAppService.sendWhatsAppMessage(
-                      channelConnection.id,
-                      channelConnection.userId,
-                      contact.identifier,
-                      responseText,
-                      true
-                    );
-                  }
+
+                  await this.sendMessageThroughChannel(
+                    channelConnection,
+                    contact,
+                    responseText,
+                    conversation,
+                    true
+                  );
                 } catch (textError) {
+                  console.error('Error sending fallback text message:', textError);
                 }
               }
             } else {
-              const insertMessage = {
-                conversationId: conversation.id,
-                contactId: contact.id,
-                channelType: channelConnection.channelType,
-                type: 'text',
-                content: responseText,
-                direction: 'outbound',
-                status: 'sent',
-                mediaUrl: null,
-                timestamp: new Date()
-              };
 
-              await storage.createMessage(insertMessage);
-
-              if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-                try {
-                  if (channelConnection.channelType === 'whatsapp_unofficial') {
-                    await whatsAppService.sendMessage(
-                      channelConnection.id,
-                      channelConnection.userId,
-                      contact.identifier,
-                      responseText,
-                      true
-                    );
-                  } else {
-                    await whatsAppService.sendWhatsAppMessage(
-                      channelConnection.id,
-                      channelConnection.userId,
-                      contact.identifier,
-                      responseText,
-                      true
-                    );
-                  }
-                } catch (error) {
-                }
+              try {
+                await this.sendMessageThroughChannel(
+                  channelConnection,
+                  contact,
+                  responseText,
+                  conversation,
+                  true
+                );
+              } catch (error) {
+                console.error('Error sending AI response through channel:', error);
               }
             }
           }
@@ -5073,6 +6024,18 @@ class FlowExecutor extends EventEmitter {
 
           } else {
 
+          }
+
+
+          if (aiResponse.mcpResults && aiResponse.mcpResults.length > 0) {
+            for (const mcpResult of aiResponse.mcpResults) {
+              if (mcpResult.success) {
+                context.setVariable(`mcp.${mcpResult.tool}.result`, mcpResult.result);
+                context.setVariable(`mcp.${mcpResult.tool}.server`, mcpResult.server);
+              } else {
+                context.setVariable(`mcp.${mcpResult.tool}.error`, mcpResult.error);
+              }
+            }
           }
 
         } catch (error) {
@@ -5908,84 +6871,43 @@ class FlowExecutor extends EventEmitter {
     channelConnection: ChannelConnection
   ): Promise<void> {
     try {
-      const data = node.data || {};
-      const flowName = context.replaceVariables(data.flowName || '');
-      const flowJSON = data.flowJSON || {};
-
-
-      let businessPhoneNumberId = '';
-      let accessToken = '';
-
-      if (channelConnection && channelConnection.channelType === 'whatsapp') {
-        const connectionData = channelConnection.connectionData as any;
-        businessPhoneNumberId = connectionData?.phoneNumberId || connectionData?.businessPhoneNumberId || '';
-        accessToken = channelConnection.accessToken || '';
-      }
-
-
-      if (!businessPhoneNumberId || !accessToken) {
-        businessPhoneNumberId = context.replaceVariables(data.businessPhoneNumberId || '');
-        accessToken = context.replaceVariables(data.accessToken || '');
-      }
-
-      if (!businessPhoneNumberId || !accessToken) {
-        throw new Error('WhatsApp Flows configuration missing: businessPhoneNumberId and accessToken are required. Please configure your WhatsApp channel connection.');
-      }
-
-      if (!flowName) {
-        throw new Error('Flow name is required');
-      }
-
-
-      const apiUrl = `https://graph.facebook.com/v17.0/${businessPhoneNumberId}/flows`;
       
 
-      const flowData = {
-        name: flowName,
-        flow_json: flowJSON,
-        categories: ['OTHER'], // Default category, can be customized
-        endpoint_uri: data.endpointUri || undefined,
-        preview: data.preview || undefined
-      };
-
-      const timeoutValue = data.timeout || 30;
-      const timeout = typeof timeoutValue === 'number' && timeoutValue < 1000 ? timeoutValue * 1000 : timeoutValue;
+      const data = node.data || {};
 
 
-      const response = await this.makeHttpRequest({
-        url: apiUrl,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'User-Agent': 'PowerChatPlus-FlowExecutor/1.0'
-        },
-        body: JSON.stringify(flowData),
-        timeout
-      });
+      if (channelConnection.channelType !== 'whatsapp_official') {
+        console.warn('WhatsApp Flows node can only be used with Official WhatsApp API connections');
 
-
-      context.setVariable('whatsapp_flows.lastResponse', response.data);
-      context.setVariable('whatsapp_flows.lastStatus', response.status);
-      context.setVariable('whatsapp_flows.flowName', flowName);
-
-      if (response.data) {
-        context.setVariable('whatsapp_flows.flowId', response.data.id);
-        context.setVariable('whatsapp_flows.flowStatus', response.data.status);
-        context.setVariable('whatsapp_flows.createdFlow', response.data);
+        const fallbackMessage = context.replaceVariables(data.bodyText || 'Please interact with our flow to continue.');
+        await this.sendMessageThroughChannel(channelConnection, contact, fallbackMessage, conversation, true);
+        return;
       }
 
 
-      if (response.data?.id && data.sendToContact) {
-        await this.sendWhatsAppFlow(
-          response.data.id,
-          contact,
-          conversation,
-          channelConnection,
-          context,
-          data
-        );
+      const flowId = context.replaceVariables(data.flowId || '');
+
+      
+
+      if (!flowId) {
+        throw new Error('Flow ID is required. Please specify an existing WhatsApp Flow ID.');
       }
+
+      
+
+
+      await this.sendWhatsAppFlow(
+        flowId,
+        contact,
+        conversation,
+        channelConnection,
+        context,
+        data
+      );
+
+
+      context.setVariable('whatsapp_flows.flowId', flowId);
+      context.setVariable('whatsapp_flows.sentAt', new Date().toISOString());
 
     } catch (error) {
       console.error('Error executing WhatsApp Flows node with context:', error);
@@ -6010,106 +6932,43 @@ class FlowExecutor extends EventEmitter {
   ): Promise<void> {
     try {
 
-      let businessPhoneNumberId = '';
-      let accessToken = '';
 
-      if (channelConnection && channelConnection.channelType === 'whatsapp') {
-        const connectionData = channelConnection.connectionData as any;
-        businessPhoneNumberId = connectionData?.phoneNumberId || connectionData?.businessPhoneNumberId || '';
-        accessToken = channelConnection.accessToken || '';
-      }
-
-
-      if (!businessPhoneNumberId || !accessToken) {
-        businessPhoneNumberId = context.replaceVariables(nodeData.businessPhoneNumberId || '');
-        accessToken = context.replaceVariables(nodeData.accessToken || '');
-      }
-
-      if (!businessPhoneNumberId || !accessToken) {
-        throw new Error('WhatsApp configuration missing: businessPhoneNumberId and accessToken are required');
-      }
-      
       if (!contact.phone) {
         throw new Error('Contact phone number is required to send WhatsApp Flow');
       }
 
 
-      const recipientPhone = contact.phone.replace(/[^\d]/g, '');
 
-
-      const messageData = {
+      const interactiveMessage = {
         messaging_product: 'whatsapp',
-        to: recipientPhone,
+        to: contact.phone,
         type: 'interactive',
         interactive: {
           type: 'flow',
-          header: nodeData.headerText ? {
-            type: 'text',
-            text: context.replaceVariables(nodeData.headerText)
-          } : undefined,
-          body: {
-            text: context.replaceVariables(nodeData.bodyText || 'Please complete this form')
-          },
-          footer: nodeData.footerText ? {
-            text: context.replaceVariables(nodeData.footerText)
-          } : undefined,
           action: {
             name: 'flow',
             parameters: {
               flow_message_version: '3',
-              flow_token: nodeData.flowToken || `flow_${Date.now()}`,
+              flow_token: `flow_${Date.now()}`,
               flow_id: flowId,
-              flow_cta: context.replaceVariables(nodeData.ctaText || 'Open Form'),
-              flow_action: 'navigate',
-              flow_action_payload: {
-                screen: nodeData.initialScreen || 'WELCOME_SCREEN',
-                data: this.replaceVariablesInObject(nodeData.initialData || {}, context)
-              }
+              flow_action: 'navigate'
             }
           }
         }
       };
 
-      const apiUrl = `https://graph.facebook.com/v17.0/${businessPhoneNumberId}/messages`;
-
-      const response = await this.makeHttpRequest({
-        url: apiUrl,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`,
-          'User-Agent': 'PowerChatPlus-FlowExecutor/1.0'
-        },
-        body: JSON.stringify(messageData),
-        timeout: 30000
-      });
+      
 
 
-      context.setVariable('whatsapp_flows.messageResponse', response.data);
-      context.setVariable('whatsapp_flows.messageId', response.data?.messages?.[0]?.id);
-      context.setVariable('whatsapp_flows.messageStatus', response.data?.messages?.[0]?.message_status);
+      await this.sendWhatsAppInteractiveMessage(channelConnection, interactiveMessage, conversation);
 
 
-      if (response.data?.messages?.[0]?.id) {
-        const insertMessage = {
-          conversationId: conversation.id,
-          contactId: contact.id,
-          type: 'interactive',
-          content: nodeData.bodyText || 'WhatsApp Flow sent',
-          direction: 'outbound',
-          status: 'sent',
-          metadata: {
-            type: 'whatsapp_flow',
-            flowId: flowId,
-            flowName: nodeData.flowName,
-            nodeId: nodeData.id,
-            channelMessageId: response.data.messages[0].id
-          },
-          timestamp: new Date()
-        };
-        
-        await storage.createMessage(insertMessage);
-      }
+
+
+      context.setVariable('whatsapp_flows.flowId', flowId);
+      context.setVariable('whatsapp_flows.bodyText', nodeData.bodyText);
+      context.setVariable('whatsapp_flows.ctaText', nodeData.ctaText);
+      context.setVariable('whatsapp_flows.sentAt', new Date().toISOString());
 
     } catch (error) {
       console.error('Error sending WhatsApp Flow:', error);
@@ -6449,99 +7308,69 @@ class FlowExecutor extends EventEmitter {
 
             if (processedResponse.text && processedResponse.text.trim()) {
               let formattedText = processedResponse.text;
-              if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial')) {
+              if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial' || _channelConnection.channelType === 'whatsapp_official')) {
                 formattedText = this.formatResponseForWhatsApp(processedResponse.text);
               }
 
               try {
-                if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial') && _contact.identifier) {
-                  try {
-                    if (_channelConnection.channelType === 'whatsapp_unofficial') {
-                      await whatsAppService.sendMessage(
-                        _channelConnection.id,
-                        _channelConnection.userId,
-                        _contact.identifier,
-                        formattedText,
-                        true,
-                        _conversation.id
-                      );
-                    } else {
-                      await whatsAppService.sendWhatsAppMessage(
-                        _channelConnection.id,
-                        _channelConnection.userId,
-                        _contact.identifier,
-                        formattedText,
-                        true,
-                        _conversation.id
-                      );
-                    }
 
-                    if (processedResponse.media && processedResponse.media.length > 0) {
-                      await this.sendN8nMediaResponses(
-                        processedResponse.media,
-                        _channelConnection,
-                        _contact,
-                        _conversation,
-                        node.id,
-                        data.chatWebhookUrl
-                      );
-                    }
+                try {
+                  await this.sendMessageThroughChannel(
+                    _channelConnection,
+                    _contact,
+                    formattedText,
+                    _conversation,
+                    true
+                  );
 
-                    const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
-                    if (recentMessages.length > 0) {
-                      const savedMessage = recentMessages[0];
-                      const existingMetadata = savedMessage.metadata
-                        ? (typeof savedMessage.metadata === 'string'
-                           ? JSON.parse(savedMessage.metadata)
-                           : savedMessage.metadata)
-                        : {};
-                      const updatedMetadata = {
-                        ...existingMetadata,
-                        source: 'n8n_direct_webhook',
-                        nodeId: node.id,
-                        webhookUrl: data.chatWebhookUrl,
-                        hasMediaResponse: processedResponse.media && processedResponse.media.length > 0
-                      };
+                  if (processedResponse.media && processedResponse.media.length > 0) {
+                    await this.sendN8nMediaResponses(
+                      processedResponse.media,
+                      _channelConnection,
+                      _contact,
+                      _conversation,
+                      node.id,
+                      data.chatWebhookUrl
+                    );
+                  }
 
-                      await storage.updateMessage(savedMessage.id, {
-                        metadata: JSON.stringify(updatedMetadata)
-                      });
-                    }
-
-                  } catch (error) {
-                    console.error('Error sending direct webhook AI response via WhatsApp:', error);
-
-                    const insertMessage = {
-                      conversationId: _conversation.id,
-                      contactId: _contact.id,
-                      content: formattedText,
-                      messageType: 'text' as const,
-                      direction: 'outbound' as const,
-                      status: 'failed' as const,
-                      timestamp: new Date(),
-                      metadata: {
-                        source: 'n8n_direct_webhook',
-                        nodeId: node.id,
-                        webhookUrl: data.chatWebhookUrl,
-                        error: 'Failed to send via WhatsApp'
-                      }
+                  const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
+                  if (recentMessages.length > 0) {
+                    const savedMessage = recentMessages[0];
+                    const existingMetadata = savedMessage.metadata
+                      ? (typeof savedMessage.metadata === 'string'
+                         ? JSON.parse(savedMessage.metadata)
+                         : savedMessage.metadata)
+                      : {};
+                    const updatedMetadata = {
+                      ...existingMetadata,
+                      source: 'n8n_direct_webhook',
+                      nodeId: node.id,
+                      webhookUrl: data.chatWebhookUrl,
+                      hasMediaResponse: processedResponse.media && processedResponse.media.length > 0
                     };
 
-                    await storage.createMessage(insertMessage);
+                    await storage.updateMessage(savedMessage.id, {
+                      metadata: JSON.stringify(updatedMetadata)
+                    });
                   }
-                } else {
+
+                } catch (error) {
+                  console.error('Error sending direct webhook AI response via channel:', error);
+
                   const insertMessage = {
                     conversationId: _conversation.id,
                     contactId: _contact.id,
                     content: formattedText,
                     messageType: 'text' as const,
                     direction: 'outbound' as const,
-                    status: 'sent' as const,
+                    status: 'failed' as const,
                     timestamp: new Date(),
                     metadata: {
                       source: 'n8n_direct_webhook',
                       nodeId: node.id,
-                      webhookUrl: data.chatWebhookUrl
+                      webhookUrl: data.chatWebhookUrl,
+                      error: 'Failed to send via channel'
                     }
                   };
 
@@ -6900,84 +7729,54 @@ class FlowExecutor extends EventEmitter {
           processedData = { message: aiResponse, aiResponse: aiResponse };
 
           try {
-            if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial') && _contact.identifier) {
-              try {
-                if (_channelConnection.channelType === 'whatsapp_unofficial') {
-                  await whatsAppService.sendMessage(
-                    _channelConnection.id,
-                    _channelConnection.userId,
-                    _contact.identifier,
-                    aiResponse,
-                    true,
-                    _conversation.id
-                  );
-                } else {
-                  await whatsAppService.sendWhatsAppMessage(
-                    _channelConnection.id,
-                    _channelConnection.userId,
-                    _contact.identifier,
-                    aiResponse,
-                    true,
-                    _conversation.id
-                  );
-                }
 
-                const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
-                if (recentMessages.length > 0) {
-                  const savedMessage = recentMessages[0];
-                  const existingMetadata = savedMessage.metadata
-                    ? (typeof savedMessage.metadata === 'string'
-                       ? JSON.parse(savedMessage.metadata)
-                       : savedMessage.metadata)
-                    : {};
-                  const updatedMetadata = {
-                    ...existingMetadata,
-                    source: 'n8n_ai_agent',
-                    nodeId: node.id,
-                    workflowName: data.workflowName || 'Unknown',
-                    n8nWorkflowId: data.workflowId,
-                    n8nWebhookUrl: data.chatWebhookUrl
-                  };
+            try {
+              await this.sendMessageThroughChannel(
+                _channelConnection,
+                _contact,
+                aiResponse,
+                _conversation,
+                true
+              );
 
-                  await storage.updateMessage(savedMessage.id, {
-                    metadata: JSON.stringify(updatedMetadata)
-                  });
-                }
-
-              } catch (error) {
-                console.error('Error sending n8n AI response via WhatsApp:', error);
-
-                const insertMessage = {
-                  conversationId: _conversation.id,
-                  contactId: _contact.id,
-                  content: aiResponse,
-                  messageType: 'text' as const,
-                  direction: 'outbound' as const,
-                  status: 'failed' as const,
-                  timestamp: new Date(),
-                  metadata: {
-                    source: 'n8n_ai_agent',
-                    nodeId: node.id,
-                    workflowName: data.workflowName || 'Unknown',
-                    error: 'Failed to send via WhatsApp'
-                  }
+              const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
+              if (recentMessages.length > 0) {
+                const savedMessage = recentMessages[0];
+                const existingMetadata = savedMessage.metadata
+                  ? (typeof savedMessage.metadata === 'string'
+                     ? JSON.parse(savedMessage.metadata)
+                     : savedMessage.metadata)
+                  : {};
+                const updatedMetadata = {
+                  ...existingMetadata,
+                  source: 'n8n_ai_agent',
+                  nodeId: node.id,
+                  workflowName: data.workflowName || 'Unknown',
+                  n8nWorkflowId: data.workflowId,
+                  n8nWebhookUrl: data.chatWebhookUrl
                 };
 
-                await storage.createMessage(insertMessage);
+                await storage.updateMessage(savedMessage.id, {
+                  metadata: JSON.stringify(updatedMetadata)
+                });
               }
-            } else {
+
+            } catch (error) {
+              console.error('Error sending n8n AI response via channel:', error);
+
               const insertMessage = {
                 conversationId: _conversation.id,
                 contactId: _contact.id,
                 content: aiResponse,
                 messageType: 'text' as const,
                 direction: 'outbound' as const,
-                status: 'sent' as const,
+                status: 'failed' as const,
                 timestamp: new Date(),
                 metadata: {
                   source: 'n8n_ai_agent',
                   nodeId: node.id,
-                  workflowName: data.workflowName || 'Unknown'
+                  workflowName: data.workflowName || 'Unknown',
+                  error: 'Failed to send via channel'
                 }
               };
 
@@ -7322,104 +8121,20 @@ class FlowExecutor extends EventEmitter {
 
             if (processedResponse.text && processedResponse.text.trim()) {
               let formattedText = processedResponse.text;
-              if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial')) {
+              if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial' || _channelConnection.channelType === 'whatsapp_official')) {
                 formattedText = this.formatResponseForWhatsApp(processedResponse.text);
               }
 
               try {
-                if ((_channelConnection.channelType === 'whatsapp' || _channelConnection.channelType === 'whatsapp_unofficial') && _contact.identifier) {
-                  try {
-                    if (_channelConnection.channelType === 'whatsapp_unofficial') {
-                      await whatsAppService.sendMessage(
-                        _channelConnection.id,
-                        _channelConnection.userId,
-                        _contact.identifier,
-                        formattedText,
-                        true,
-                        _conversation.id
-                      );
-                    } else {
-                      await whatsAppService.sendWhatsAppMessage(
-                        _channelConnection.id,
-                        _channelConnection.userId,
-                        _contact.identifier,
-                        formattedText,
-                        true,
-                        _conversation.id
-                      );
-                    }
 
-                    if (processedResponse.media && processedResponse.media.length > 0) {
-                      await this.sendMakeMediaResponses(
-                        processedResponse.media,
-                        _channelConnection,
-                        _contact,
-                        _conversation,
-                        node.id,
-                        data.webhookUrl
-                      );
-                    }
-
-                    const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
-                    if (recentMessages.length > 0) {
-                      const savedMessage = recentMessages[0];
-                      const existingMetadata = savedMessage.metadata
-                        ? (typeof savedMessage.metadata === 'string'
-                           ? JSON.parse(savedMessage.metadata)
-                           : savedMessage.metadata)
-                        : {};
-                      const updatedMetadata = {
-                        ...existingMetadata,
-                        source: 'make_webhook',
-                        nodeId: node.id,
-                        webhookUrl: data.webhookUrl,
-                        hasMediaResponse: processedResponse.media && processedResponse.media.length > 0
-                      };
-
-                      await storage.updateMessage(savedMessage.id, {
-                        metadata: JSON.stringify(updatedMetadata)
-                      });
-                    }
-
-                  } catch (error) {
-                    console.error('Error sending Make.com webhook response via WhatsApp:', error);
-
-                    const insertMessage = {
-                      conversationId: _conversation.id,
-                      contactId: _contact.id,
-                      content: formattedText,
-                      messageType: 'text' as const,
-                      direction: 'outbound' as const,
-                      status: 'failed' as const,
-                      timestamp: new Date(),
-                      metadata: {
-                        source: 'make_webhook',
-                        nodeId: node.id,
-                        webhookUrl: data.webhookUrl,
-                        error: 'Failed to send via WhatsApp'
-                      }
-                    };
-
-                    await storage.createMessage(insertMessage);
-                  }
-                } else {
-                  const insertMessage = {
-                    conversationId: _conversation.id,
-                    contactId: _contact.id,
-                    content: formattedText,
-                    messageType: 'text' as const,
-                    direction: 'outbound' as const,
-                    status: 'sent' as const,
-                    timestamp: new Date(),
-                    metadata: {
-                      source: 'make_webhook',
-                      nodeId: node.id,
-                      webhookUrl: data.webhookUrl,
-                      hasMediaResponse: processedResponse.media && processedResponse.media.length > 0
-                    }
-                  };
-
-                  await storage.createMessage(insertMessage);
+                try {
+                  await this.sendMessageThroughChannel(
+                    _channelConnection,
+                    _contact,
+                    formattedText,
+                    _conversation,
+                    true
+                  );
 
                   if (processedResponse.media && processedResponse.media.length > 0) {
                     await this.sendMakeMediaResponses(
@@ -7431,6 +8146,48 @@ class FlowExecutor extends EventEmitter {
                       data.webhookUrl
                     );
                   }
+
+                  const recentMessages = await storage.getMessagesByConversationPaginated(_conversation.id, 1, 0);
+                  if (recentMessages.length > 0) {
+                    const savedMessage = recentMessages[0];
+                    const existingMetadata = savedMessage.metadata
+                      ? (typeof savedMessage.metadata === 'string'
+                         ? JSON.parse(savedMessage.metadata)
+                         : savedMessage.metadata)
+                      : {};
+                    const updatedMetadata = {
+                      ...existingMetadata,
+                      source: 'make_webhook',
+                      nodeId: node.id,
+                      webhookUrl: data.webhookUrl,
+                      hasMediaResponse: processedResponse.media && processedResponse.media.length > 0
+                    };
+
+                    await storage.updateMessage(savedMessage.id, {
+                      metadata: JSON.stringify(updatedMetadata)
+                    });
+                  }
+
+                } catch (error) {
+                  console.error('Error sending Make.com webhook response via channel:', error);
+
+                  const insertMessage = {
+                    conversationId: _conversation.id,
+                    contactId: _contact.id,
+                    content: formattedText,
+                    messageType: 'text' as const,
+                    direction: 'outbound' as const,
+                    status: 'failed' as const,
+                    timestamp: new Date(),
+                    metadata: {
+                      source: 'make_webhook',
+                      nodeId: node.id,
+                      webhookUrl: data.webhookUrl,
+                      error: 'Failed to send via channel'
+                    }
+                  };
+
+                  await storage.createMessage(insertMessage);
                 }
               } catch (error) {
                 console.error('Error processing Make.com webhook response:', error);
@@ -7986,9 +8743,11 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
         }
       } else {
 
-        const errorMessage = 'Lo siento, no pude crear el evento del calendario. Por favor intenta de nuevo.';
-
-
+        let errorMessage = 'Lo siento, no pude crear el evento del calendario. Por favor intenta de nuevo.';
+        
+        if (eventResult.error && (eventResult.error.includes('not available') || eventResult.error.includes('conflict'))) {
+          errorMessage = '⚠️ El horario solicitado ya está reservado. Por favor usa el verificador de disponibilidad para encontrar un horario abierto, o elige un horario diferente para tu cita.';
+        }
 
         try {
           await this.sendMessageThroughChannel(
@@ -8028,14 +8787,28 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
       const durationMinutes = data.durationMinutes || 60;
 
       const userId = channelConnection.userId;
+      const companyId = channelConnection.companyId || 1;
 
+
+      const businessHours = data.calendarBusinessHours || { start: '09:00', end: '17:00' };
+      const businessHoursStart = parseInt(businessHours.start.split(':')[0]) || 9;
+      const businessHoursEnd = parseInt(businessHours.end.split(':')[0]) || 17;
+
+
+      const timeZone = data.calendarTimeZone || 'UTC';
+      const bufferMinutes = data.calendarBufferMinutes || 0;
 
       const availabilityResult = await googleCalendarService.getAvailableTimeSlots(
         userId,
+        companyId,
         useDateRange ? undefined : singleDate,
         durationMinutes,
         useDateRange ? startDate : undefined,
-        useDateRange ? endDate : undefined
+        useDateRange ? endDate : undefined,
+        businessHoursStart,
+        businessHoursEnd,
+        timeZone,
+        bufferMinutes
       );
 
       if (!availabilityResult.success) {
@@ -8812,6 +9585,251 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
   /**
    * Execute an AI Assistant node to generate AI responses from multiple providers
    */
+  /**
+   * Get canonical calendar function definitions for Google Calendar
+   * These are server-enforced schemas to avoid UI drift
+   */
+  private getCanonicalCalendarFunctions(
+    calendarDefaultDuration: number = 60,
+    calendarBusinessHours: { start: string; end: string } = { start: '09:00', end: '17:00' }
+  ): any[] {
+    return [
+      {
+        id: `calendar_check_availability_canonical`,
+        name: 'Check Availability',
+        description: 'Check available time slots in Google Calendar',
+        functionDefinition: {
+          name: 'check_availability',
+          description: 'Check available time slots in Google Calendar for scheduling appointments. Use this to find free time slots before booking.',
+          parameters: {
+            type: 'object',
+            properties: {
+              date: {
+                type: 'string',
+                description: 'Date to check availability for (YYYY-MM-DD format)'
+              },
+              duration_minutes: {
+                type: 'number',
+                description: 'Duration of the appointment in minutes',
+                default: calendarDefaultDuration
+              },
+              start_time: {
+                type: 'string',
+                description: 'Earliest time to consider (HH:MM format, optional)',
+                default: calendarBusinessHours.start
+              },
+              end_time: {
+                type: 'string',
+                description: 'Latest time to consider (HH:MM format, optional)',
+                default: calendarBusinessHours.end
+              }
+            },
+            required: ['date']
+          }
+        },
+        outputHandle: 'calendar_availability',
+        enabled: true
+      },
+      {
+        id: `calendar_book_appointment_canonical`,
+        name: 'Book Appointment',
+        description: 'Book a new appointment in Google Calendar',
+        functionDefinition: {
+          name: 'book_appointment',
+          description: 'Create a new calendar event/appointment in Google Calendar. Use this when the user wants to schedule a meeting or appointment. IMPORTANT: Always convert user-provided dates and times to ISO format (YYYY-MM-DDTHH:MM:SS) before calling this function.',
+          parameters: {
+            type: 'object',
+            properties: {
+              title: {
+                type: 'string',
+                description: 'Title/summary of the appointment'
+              },
+              description: {
+                type: 'string',
+                description: 'Detailed description of the appointment'
+              },
+              start_datetime: {
+                type: 'string',
+                description: 'Start date and time in ISO format (YYYY-MM-DDTHH:MM:SS). Convert user input like "November 10 at 4:15 PM" to "2025-11-10T16:15:00" before calling.'
+              },
+              end_datetime: {
+                type: 'string',
+                description: 'End date and time in ISO format (YYYY-MM-DDTHH:MM:SS). Convert user input to this format before calling.'
+              },
+              time_zone: {
+                type: 'string',
+                description: 'Timezone for the event (e.g., America/New_York, UTC). Defaults to node configuration timezone.'
+              },
+              attendees: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    email: { type: 'string', description: 'Attendee email address' },
+                    displayName: { type: 'string', description: 'Attendee display name (optional)' }
+                  },
+                  required: ['email']
+                },
+                description: 'Array of attendee objects with email and optional displayName (optional)'
+              },
+              attendee_emails: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Email addresses of attendees (optional, legacy format)'
+              },
+              location: {
+                type: 'string',
+                description: 'Location of the appointment (optional)'
+              },
+              send_updates: {
+                type: 'boolean',
+                description: 'Whether to send email notifications to attendees. Defaults to true.',
+                default: true
+              },
+              organizer_email: {
+                type: 'string',
+                description: 'Email of the event organizer (optional, defaults to calendar owner)'
+              }
+            },
+            required: ['title', 'start_datetime', 'end_datetime']
+          }
+        },
+        outputHandle: 'calendar_book',
+        enabled: true
+      },
+      {
+        id: `calendar_list_events_canonical`,
+        name: 'List Events',
+        description: 'List existing events from Google Calendar',
+        functionDefinition: {
+          name: 'list_calendar_events',
+          description: 'Retrieve existing calendar events from Google Calendar for a specific date range. Use this to check what appointments are already scheduled.',
+          parameters: {
+            type: 'object',
+            properties: {
+              start_date: {
+                type: 'string',
+                description: 'Start date for the range (YYYY-MM-DD format)'
+              },
+              end_date: {
+                type: 'string',
+                description: 'End date for the range (YYYY-MM-DD format)'
+              },
+              max_results: {
+                type: 'number',
+                description: 'Maximum number of events to return',
+                default: 10
+              }
+            },
+            required: ['start_date', 'end_date']
+          }
+        },
+        outputHandle: 'calendar_list',
+        enabled: true
+      },
+      {
+        id: `calendar_update_event_canonical`,
+        name: 'Update Event',
+        description: 'Update an existing event in Google Calendar',
+        functionDefinition: {
+          name: 'update_calendar_event',
+          description: 'Modify an existing calendar event in Google Calendar. Use this to change appointment details like time, title, or attendees.',
+          parameters: {
+            type: 'object',
+            properties: {
+              event_id: {
+                type: 'string',
+                description: 'ID of the event to update'
+              },
+              title: {
+                type: 'string',
+                description: 'New title/summary of the appointment (optional)'
+              },
+              description: {
+                type: 'string',
+                description: 'New description of the appointment (optional)'
+              },
+              start_datetime: {
+                type: 'string',
+                description: 'New start date and time in ISO format (optional)'
+              },
+              end_datetime: {
+                type: 'string',
+                description: 'New end date and time in ISO format (optional)'
+              },
+              time_zone: {
+                type: 'string',
+                description: 'Timezone for the event (e.g., America/New_York, UTC). Defaults to node configuration timezone.'
+              },
+              location: {
+                type: 'string',
+                description: 'New location of the appointment (optional)'
+              },
+              attendees: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    email: { type: 'string', description: 'Attendee email address' },
+                    displayName: { type: 'string', description: 'Attendee display name (optional)' }
+                  },
+                  required: ['email']
+                },
+                description: 'Array of attendee objects with email and optional displayName (optional)'
+              },
+              send_updates: {
+                type: 'boolean',
+                description: 'Whether to send email notifications to attendees about the update. Defaults to true.',
+                default: true
+              }
+            },
+            required: ['event_id']
+          }
+        },
+        outputHandle: 'calendar_update',
+        enabled: true
+      },
+      {
+        id: `calendar_cancel_event_canonical`,
+        name: 'Cancel Event',
+        description: 'Cancel/delete an event from Google Calendar',
+        functionDefinition: {
+          name: 'cancel_calendar_event',
+          description: 'Cancel or delete a calendar event from Google Calendar. Use this to remove appointments that are no longer needed. You can provide either the event_id OR the date/time/email to find and cancel the event. IMPORTANT: Always normalize dates to YYYY-MM-DD and times to HH:MM (24-hour) format before calling this function.',
+          parameters: {
+            type: 'object',
+            properties: {
+              event_id: {
+                type: 'string',
+                description: 'ID of the event to cancel/delete. If not provided, date and time must be provided to find the event.'
+              },
+              date: {
+                type: 'string',
+                description: 'Date of the appointment to cancel. MUST be in YYYY-MM-DD format (e.g., "2025-11-10"). Convert user input like "10/11/2025", "November 10", or "tomorrow" to this format before calling. Required if event_id is not provided.'
+              },
+              time: {
+                type: 'string',
+                description: 'Time of the appointment to cancel. MUST be in HH:MM format using 24-hour notation (e.g., "16:15" for 4:15 PM). Convert user input like "4:15 PM", "4:15 pm", or "16:15" to this format before calling. Required if event_id is not provided.'
+              },
+              attendee_email: {
+                type: 'string',
+                description: 'Email address of an attendee to help identify the correct event. Recommended when canceling by date/time to ensure the correct appointment is found.'
+              },
+              send_updates: {
+                type: 'boolean',
+                description: 'Whether to send cancellation notifications to attendees',
+                default: true
+              }
+            },
+            required: []
+          }
+        },
+        outputHandle: 'calendar_cancel',
+        enabled: true
+      }
+    ];
+  }
+
   async executeAIAssistantNode(
     node: any,
     message: Message,
@@ -8863,14 +9881,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
             await storage.createMessage(insertMessage);
 
-            if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-              await whatsAppService.sendMessage(
-                channelConnection.id,
-                channelConnection.userId,
-                contact.identifier,
+
+            try {
+              await this.sendMessageThroughChannel(
+                channelConnection,
+                contact,
                 errorMessage,
+                conversation,
                 true
               );
+            } catch (error) {
+              console.error('Error sending usage check error message through channel:', error);
             }
 
             return;
@@ -8907,14 +9928,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
           await storage.createMessage(insertMessage);
 
-          if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-            await whatsAppService.sendMessage(
-              channelConnection.id,
-              channelConnection.userId,
-              contact.identifier,
+
+          try {
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
               errorMessage,
+              conversation,
               true
             );
+          } catch (error) {
+            console.error('Error sending credential error message through channel:', error);
           }
 
           return;
@@ -8927,7 +9951,101 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
       const { injectDateTimeContext } = await import('../utils/timezone-utils');
       const timezone = data.timezone || 'UTC';
       const baseSystemPrompt = data.prompt || 'You are a helpful assistant.';
-      let systemPrompt = injectDateTimeContext(baseSystemPrompt, timezone);
+
+
+      let calendarSystemDirectives = '';
+      if (data.enableGoogleCalendar) {
+        calendarSystemDirectives = `
+
+CALENDAR SYSTEM DIRECTIVES (ENFORCED):
+You have access to Google Calendar integration. Follow these canonical steps for calendar operations:
+
+⚠️ CRITICAL DATE/TIME FORMAT RULES (APPLY TO ALL CALENDAR FUNCTIONS):
+Before calling ANY calendar function, you MUST normalize all dates and times to standard formats:
+- **Dates**: ALWAYS use YYYY-MM-DD format (e.g., "2025-11-10")
+- **Times**: ALWAYS use HH:MM format in 24-hour notation (e.g., "16:15" for 4:15 PM)
+- **DateTime**: For ISO datetime, use YYYY-MM-DDTHH:MM:SS format
+
+**Common conversions you MUST perform:**
+- "10/11/2025" → Determine if MM/DD or DD/MM from context → "2025-11-10"
+- "November 10, 2025" → "2025-11-10"
+- "Nov 10" → Add current year → "2025-11-10"
+- "tomorrow" → Calculate date → "2025-11-11"
+- "4:15 PM" or "4:15 pm" → "16:15"
+- "4:15:00 PM" → "16:15"
+- "4 PM" → "16:00"
+- "10/11/2025, 4:15:00 pm" → Split to date="2025-11-10" and time="16:15"
+
+⚠️ CRITICAL CANCELLATION RULE:
+When a user wants to cancel an appointment and provides date/time information,
+you MUST call cancel_calendar_event DIRECTLY with normalized date/time/email parameters.
+DO NOT call list_calendar_events first. The cancel function will find and cancel the event automatically.
+
+1. CHECK_AVAILABILITY: Always check availability before booking appointments.
+   - Use check_availability function with date (YYYY-MM-DD format) and duration_minutes
+   - Present available time slots to the user
+   - Wait for user to select a preferred time
+
+2. BOOK_APPOINTMENT: Create new calendar events only after confirming details.
+   - Required: title, start_datetime (ISO format: YYYY-MM-DDTHH:MM:SS), end_datetime
+   - Optional: description, location, attendees, time_zone
+   - Always confirm the booking details with the user before calling the function
+   - Convert user's date/time to ISO format before calling
+   - If a booking attempt fails due to unavailability, immediately offer to check available time slots for the same day or nearby dates
+   - Always acknowledge the conflict politely and provide alternative options
+
+3. UPDATE_CALENDAR_EVENT: Modify existing appointments.
+   - Required: event_id
+   - If event_id is not provided, first ask for the date and time (or event ID) of the appointment
+   - Use conversation history to infer recent bookings (e.g., "the one we just scheduled")
+   - If privacy requires it (e.g., past event), then ask for the associated email to confirm involvement
+   - Confirm changes with user before updating
+   - Normalize all date/time values before calling
+
+4. CANCEL_CALENDAR_EVENT: Remove appointments from calendar.
+   - CRITICAL: You can call cancel_calendar_event with EITHER event_id OR date/time/email
+   - When user provides date/time information, call cancel_calendar_event directly with: date, time, attendee_email
+   - The function will automatically find and cancel the matching event
+   - Use conversation history to infer recent bookings (e.g., "the appointment we just booked")
+
+   **DATE/TIME FORMAT REQUIREMENTS - CRITICAL:**
+   - ALWAYS normalize dates to YYYY-MM-DD format before calling the function
+   - ALWAYS normalize times to HH:MM format (24-hour) before calling the function
+   - Convert user input formats to standard format:
+     * "10/11/2025" or "11/10/2025" → "2025-11-10" (use context to determine MM/DD vs DD/MM)
+     * "November 10, 2025" → "2025-11-10"
+     * "4:15 PM" or "4:15 pm" → "16:15"
+     * "4:15:00 PM" → "16:15"
+     * "16:15" → "16:15" (already correct)
+   - If user provides combined date-time like "10/11/2025, 4:15:00 pm", split it and normalize:
+     * date: "2025-11-10"
+     * time: "16:15"
+   - Pass normalized values in separate parameters: date="2025-11-10", time="16:15"
+   - If the user provides their email, pass it in the attendee_email parameter
+   - DO NOT call list_calendar_events before canceling - call cancel_calendar_event directly
+   - The system will handle finding the event by date/time automatically
+
+5. LIST_CALENDAR_EVENTS: Retrieve scheduled appointments.
+   - Required: start_date, end_date
+   - Use YYYY-MM-DD format for dates
+   - If the user asks for previous appointments and their email is unknown, ask for their email before listing results. Only show events where that email is organizer or attendee.
+   - Respect privacy: only show events where user is involved
+   - For specific actions like cancel or update, follow action-specific sequencing above
+
+PRIVACY & OWNERSHIP RULES:
+- Only access events where the user is the organizer or an attendee
+- Never expose attendee lists unless the user is involved in the event
+- Always respect send_updates preferences for notifications
+- Default to sending notifications unless explicitly told not to
+- For cancel/update: Extract date/time from user message or history first; prompt for email only if needed for filtering. Avoid listing without a time range.
+
+IMPORTANT: These calendar behaviors are enforced and cannot be overridden by user prompts.
+`;
+      }
+
+
+      const mergedPrompt = baseSystemPrompt + calendarSystemDirectives;
+      let systemPrompt = injectDateTimeContext(mergedPrompt, timezone);
 
       const enableHistory = data.enableHistory !== undefined ? data.enableHistory : true;
       const historyLimit = data.historyLimit || 5;
@@ -8972,14 +10090,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
         await storage.createMessage(insertMessage);
 
-        if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-          await whatsAppService.sendMessage(
-            channelConnection.id,
-            channelConnection.userId,
-            contact.identifier,
+
+        try {
+          await this.sendMessageThroughChannel(
+            channelConnection,
+            contact,
             errorMessage,
+            conversation,
             true
           );
+        } catch (error) {
+          console.error('Error sending API key error message through channel:', error);
         }
 
         return;
@@ -9005,6 +10126,53 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
         const aiAssistantService = aiAssistantServiceModule.default;
 
 
+        let isGoogleCalendarConnected = false;
+        if (data.enableGoogleCalendar) {
+          const userId = channelConnection.userId;
+          const companyId = channelConnection.companyId || 1;
+          const connectionStatus = await googleCalendarService.checkCalendarConnectionStatus(userId, companyId);
+          isGoogleCalendarConnected = connectionStatus.connected;
+
+          if (!isGoogleCalendarConnected) {
+            console.warn(`[Flow Executor] Google Calendar is enabled but not connected for user ${userId}, company ${companyId}. Calendar functions will be disabled.`);
+          }
+        }
+
+
+
+        let mergedCalendarFunctions: any[] = [];
+        if (data.enableGoogleCalendar && isGoogleCalendarConnected) {
+          const calendarDefaultDuration = data.calendarDefaultDuration || 60;
+          const calendarBusinessHours = data.calendarBusinessHours || { start: '09:00', end: '17:00' };
+
+
+          const canonicalFunctions = this.getCanonicalCalendarFunctions(
+            calendarDefaultDuration,
+            calendarBusinessHours
+          );
+
+
+          mergedCalendarFunctions = [...canonicalFunctions];
+
+
+
+          const clientFunctions = data.calendarFunctions || [];
+
+        
+
+          for (const clientFunc of clientFunctions) {
+            const functionName = clientFunc.functionDefinition?.name;
+            if (functionName) {
+              const existingIndex = mergedCalendarFunctions.findIndex(
+                f => f.functionDefinition?.name === functionName
+              );
+
+              if (existingIndex === -1) {
+                mergedCalendarFunctions.push(clientFunc);
+              }
+            }
+          }
+        }
 
         const aiConfig = {
           provider,
@@ -9022,11 +10190,11 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
           ttsVoice: data.ttsVoice || 'alloy',
           voiceResponseMode: data.voiceResponseMode || 'always',
           maxAudioDuration: data.maxAudioDuration || 30,
-          enableFunctionCalling: data.enableTaskExecution || data.enableGoogleCalendar || data.enableZohoCalendar || false,
+          enableFunctionCalling: data.enableTaskExecution || (data.enableGoogleCalendar && isGoogleCalendarConnected) || data.enableZohoCalendar || false,
           enableTaskExecution: data.enableTaskExecution || false,
           tasks: data.tasks || [],
-          enableGoogleCalendar: data.enableGoogleCalendar || false,
-          calendarFunctions: data.calendarFunctions || [],
+          enableGoogleCalendar: data.enableGoogleCalendar && isGoogleCalendarConnected,
+          calendarFunctions: mergedCalendarFunctions,
           enableZohoCalendar: data.enableZohoCalendar || false,
           zohoCalendarFunctions: data.zohoCalendarFunctions || [],
           elevenLabsApiKey: data.elevenLabsApiKey,
@@ -9126,11 +10294,10 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
       const responseText = this.replaceVariables(aiResponse.text, message, contact);
 
-      if (aiResponse.audioUrl && (channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
+      if (aiResponse.audioUrl && (channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial' || channelConnection.channelType === 'whatsapp_official') && contact.identifier) {
         try {
           const audioPath = aiResponse.audioUrl.startsWith('/') ? aiResponse.audioUrl.slice(1) : aiResponse.audioUrl;
           const fullAudioPath = path.join(process.cwd(), audioPath);
-
 
 
           if (channelConnection.channelType === 'whatsapp_unofficial') {
@@ -9142,31 +10309,26 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
             );
           } else {
 
-            await whatsAppService.sendWhatsAppMessage(
-              channelConnection.id,
-              channelConnection.userId,
-              contact.identifier,
-              responseText
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
+              responseText,
+              conversation,
+              true
             );
           }
         } catch (error) {
           try {
-            if (channelConnection.channelType === 'whatsapp_unofficial') {
-              await whatsAppService.sendMessage(
-                channelConnection.id,
-                channelConnection.userId,
-                contact.identifier,
-                responseText
-              );
-            } else {
-              await whatsAppService.sendWhatsAppMessage(
-                channelConnection.id,
-                channelConnection.userId,
-                contact.identifier,
-                responseText
-              );
-            }
+
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
+              responseText,
+              conversation,
+              true
+            );
           } catch (textError) {
+            console.error('Error sending fallback text message:', textError);
           }
         }
       } else if (responseText && responseText.trim()) {
@@ -9179,22 +10341,23 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
             true
           );
         } catch (error) {
+          console.error('Error sending AI response through channel:', error);
 
-            const insertMessage = {
-              conversationId: conversation.id,
-              contactId: contact.id,
-              channelType: channelConnection.channelType,
-              type: 'text',
-              content: responseText,
-              direction: 'outbound',
-              status: 'failed',
-              isFromBot: true,
-              mediaUrl: null,
-              timestamp: new Date()
-            };
+          const insertMessage = {
+            conversationId: conversation.id,
+            contactId: contact.id,
+            channelType: channelConnection.channelType,
+            type: 'text',
+            content: responseText,
+            direction: 'outbound',
+            status: 'failed',
+            isFromBot: true,
+            mediaUrl: null,
+            timestamp: new Date()
+          };
 
-            await storage.createMessage(insertMessage);
-          }
+          await storage.createMessage(insertMessage);
+        }
       }
 
       if (data.enableTaskExecution && aiResponse.functionCalls && aiResponse.functionCalls.length > 0) {
@@ -9203,9 +10366,9 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
       if (data.enableGoogleCalendar && aiResponse.triggeredCalendarFunctions && aiResponse.triggeredCalendarFunctions.length > 0) {
         for (const calendarFunction of aiResponse.triggeredCalendarFunctions) {
           try {
-            await this.executeCalendarFunction(calendarFunction, conversation, contact, channelConnection, data);
+            await this.executeCalendarFunction(calendarFunction, conversation, contact, channelConnection, data, conversationHistory);
           } catch (error) {
-            const errorMessage = `Encontré un error al intentar ${calendarFunction.name}: ${error instanceof Error ? error.message : 'Error desconocido'}`;
+            const errorMessage = `I encountered an error while trying to ${calendarFunction.name}: ${error instanceof Error ? error.message : 'Unknown error'}`;
             await this.sendMessageThroughChannel(
               channelConnection,
               contact,
@@ -9240,6 +10403,251 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
   }
 
   /**
+   * Helper function to normalize date format to YYYY-MM-DD
+   * Handles various input formats: MM/DD/YYYY, DD/MM/YYYY, YYYY-MM-DD, etc.
+   */
+  private normalizeDateFormat(dateStr: string): string | null {
+    try {
+
+      dateStr = dateStr.trim();
+
+
+      let parsedDate: Date | null = null;
+
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+        parsedDate = new Date(dateStr);
+      }
+
+      else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dateStr)) {
+        const [month, day, year] = dateStr.split('/');
+        parsedDate = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
+      }
+
+      else if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(dateStr)) {
+        const [day, month, year] = dateStr.split('-');
+        parsedDate = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
+      }
+
+      else if (/^\d{4}\/\d{2}\/\d{2}$/.test(dateStr)) {
+        parsedDate = new Date(dateStr.replace(/\//g, '-'));
+      }
+
+      else {
+        parsedDate = new Date(dateStr);
+      }
+
+
+      if (parsedDate && !isNaN(parsedDate.getTime())) {
+
+        const year = parsedDate.getFullYear();
+        const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
+        const day = String(parsedDate.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      }
+
+      return null;
+    } catch (error) {
+      console.error('[normalizeDateFormat] Error parsing date:', dateStr, error);
+      return null;
+    }
+  }
+
+  /**
+   * Helper function to normalize time format to HH:MM (24-hour)
+   * Handles various input formats: 12-hour with AM/PM, 24-hour, etc.
+   */
+  private normalizeTimeFormat(timeStr: string): string | null {
+    try {
+
+
+      timeStr = timeStr.trim();
+
+
+      if (/^\d{1,2}:\d{2}$/.test(timeStr)) {
+        const [hours, minutes] = timeStr.split(':');
+        const h = parseInt(hours);
+        if (h >= 0 && h <= 23) {
+          const result = `${hours.padStart(2, '0')}:${minutes}`;
+
+          return result;
+        }
+      }
+
+
+      if (/^\d{1,2}:\d{2}:\d{2}$/.test(timeStr)) {
+        const [hours, minutes] = timeStr.split(':');
+        const h = parseInt(hours);
+        if (h >= 0 && h <= 23) {
+          const result = `${hours.padStart(2, '0')}:${minutes}`;
+
+          return result;
+        }
+      }
+
+
+      const ampmSecondsMatch = timeStr.match(/^(\d{1,2}):(\d{2}):(\d{2})\s*(am|pm)$/i);
+      if (ampmSecondsMatch) {
+        let hours = parseInt(ampmSecondsMatch[1]);
+        const minutes = ampmSecondsMatch[2];
+        const period = ampmSecondsMatch[4].toLowerCase();
+
+
+        if (period === 'pm' && hours !== 12) {
+          hours += 12;
+        } else if (period === 'am' && hours === 12) {
+          hours = 0;
+        }
+
+        const result = `${String(hours).padStart(2, '0')}:${minutes}`;
+
+        return result;
+      }
+
+
+      const ampmMatch = timeStr.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+      if (ampmMatch) {
+        let hours = parseInt(ampmMatch[1]);
+        const minutes = ampmMatch[2];
+        const period = ampmMatch[3].toLowerCase();
+
+
+        if (period === 'pm' && hours !== 12) {
+          hours += 12;
+        } else if (period === 'am' && hours === 12) {
+          hours = 0;
+        }
+
+        const result = `${String(hours).padStart(2, '0')}:${minutes}`;
+
+        return result;
+      }
+
+
+      const ampmNoMinMatch = timeStr.match(/^(\d{1,2})\s*(am|pm)$/i);
+      if (ampmNoMinMatch) {
+        let hours = parseInt(ampmNoMinMatch[1]);
+        const period = ampmNoMinMatch[2].toLowerCase();
+
+        if (period === 'pm' && hours !== 12) {
+          hours += 12;
+        } else if (period === 'am' && hours === 12) {
+          hours = 0;
+        }
+
+        return `${String(hours).padStart(2, '0')}:00`;
+      }
+
+      return null;
+    } catch (error) {
+      console.error('[normalizeTimeFormat] Error parsing time:', timeStr, error);
+      return null;
+    }
+  }
+
+  /**
+   * Helper function to parse combined date-time strings
+   * Handles formats like "10/11/2025, 4:15:00 pm" or "2025-11-10 16:15"
+   */
+  private parseDateTimeString(dateTimeStr: string): { date: string | null, time: string | null } {
+    try {
+
+      dateTimeStr = dateTimeStr.trim();
+
+
+      let datePart: string | null = null;
+      let timePart: string | null = null;
+
+
+      if (dateTimeStr.includes(',')) {
+        const parts = dateTimeStr.split(',');
+        datePart = parts[0].trim();
+        timePart = parts[1].trim();
+
+      }
+
+      else if (dateTimeStr.includes(' ')) {
+        const parts = dateTimeStr.split(' ');
+        datePart = parts[0].trim();
+
+        timePart = parts.slice(1).join(' ').trim();
+
+      }
+
+      else if (dateTimeStr.includes('T')) {
+        const parts = dateTimeStr.split('T');
+        datePart = parts[0].trim();
+        timePart = parts[1].split('.')[0].trim(); // Remove milliseconds if present
+
+      }
+
+      const normalizedDate = datePart ? this.normalizeDateFormat(datePart) : null;
+      const normalizedTime = timePart ? this.normalizeTimeFormat(timePart) : null;
+
+
+
+      return {
+        date: normalizedDate,
+        time: normalizedTime
+      };
+    } catch (error) {
+      console.error('[parseDateTimeString] Error parsing date-time:', dateTimeStr, error);
+      return { date: null, time: null };
+    }
+  }
+
+  /**
+   * Helper function to extract recent booking details from conversation history
+   */
+  private extractRecentBookingFromHistory(conversationHistory: Message[], withinHours: number = 24): any | null {
+    if (!conversationHistory || conversationHistory.length === 0) {
+      return null;
+    }
+
+    const cutoffTime = new Date(Date.now() - withinHours * 60 * 60 * 1000);
+
+
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const message = conversationHistory[i];
+
+
+      if (!message.createdAt || new Date(message.createdAt) < cutoffTime) {
+        break;
+      }
+
+
+      if (message.direction === 'outbound' && message.content) {
+        try {
+
+          const content = message.content;
+
+
+          if (content.includes('book_appointment') || content.includes('appointment') || content.includes('scheduled')) {
+
+            const dateMatch = content.match(/(\d{4}-\d{2}-\d{2})/);
+            const timeMatch = content.match(/(\d{1,2}:\d{2})/);
+            const emailMatch = content.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+
+            if (dateMatch || timeMatch) {
+              return {
+                date: dateMatch ? dateMatch[1] : null,
+                time: timeMatch ? timeMatch[1] : null,
+                attendee_email: emailMatch ? emailMatch[1] : null,
+                source: 'history_extraction'
+              };
+            }
+          }
+        } catch (error) {
+
+          continue;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Execute a calendar function call from AI Assistant
    */
   async executeCalendarFunction(
@@ -9247,7 +10655,8 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
     conversation: Conversation,
     contact: Contact,
     channelConnection: ChannelConnection,
-    nodeData: any
+    nodeData: any,
+    conversationHistory?: Message[]
   ): Promise<void> {
     const { name, arguments: args } = calendarFunction;
 
@@ -9273,11 +10682,11 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
       const timeZone = nodeData.calendarTimeZone || 'UTC';
 
       if (!companyId) {
-        throw new Error('Se requiere el ID de la empresa para las operaciones del calendario');
+        throw new Error('Company ID is required for calendar operations');
       }
 
       if (!userId) {
-        throw new Error('No se pudo resolver el ID del usuario para las operaciones del calendario');
+        throw new Error('Could not resolve user ID for calendar operations');
       }
 
       let result: any;
@@ -9285,27 +10694,41 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
       switch (name) {
         case 'check_availability':
+
+          const businessHours = nodeData.calendarBusinessHours || { start: '09:00', end: '17:00' };
+          const businessHoursStart = parseInt(businessHours.start.split(':')[0]) || 9;
+          const businessHoursEnd = parseInt(businessHours.end.split(':')[0]) || 17;
+          const bufferMinutes = nodeData.calendarBufferMinutes || 0;
+
           result = await googleCalendarService.getAvailableTimeSlots(
             userId,
             companyId,
             args.date,
-            args.duration_minutes || args.duration || 30
+            args.duration_minutes || args.duration || nodeData.calendarDefaultDuration || 30,
+            undefined, // startDate
+            undefined, // endDate
+            businessHoursStart,
+            businessHoursEnd,
+            timeZone,
+            bufferMinutes
           );
 
           if (result.success) {
             const timeSlots = result.timeSlots || [];
             if (timeSlots.length > 0 && timeSlots[0].slots.length > 0) {
               const slotList = timeSlots[0].slots.join('\n');
-              successMessage = `Horarios disponibles para ${args.date}:\n${slotList}`;
+              successMessage = `Available time slots for ${args.date}:\n${slotList}`;
             } else {
-              successMessage = `No se encontraron horarios disponibles para ${args.date}.`;
+              successMessage = `No available time slots found for ${args.date}.`;
             }
           } else {
-            throw new Error(result.error || 'Error al verificar disponibilidad');
+            throw new Error(result.error || 'Error checking availability');
           }
           break;
 
         case 'book_appointment':
+
+          let processedAttendees = args.attendees || args.attendee_emails || [];
 
           const eventData = {
             summary: args.title || args.summary,
@@ -9313,13 +10736,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
             location: args.location || 'Virtual',
             start: {
               dateTime: args.start_datetime || args.start_time || args.startDateTime,
-              timeZone: timeZone
+              timeZone: args.time_zone || timeZone
             },
             end: {
               dateTime: args.end_datetime || args.end_time || args.endDateTime,
-              timeZone: timeZone
+              timeZone: args.time_zone || timeZone
             },
-            attendees: args.attendees || []
+            attendees: processedAttendees,
+            send_updates: args.send_updates !== undefined ? args.send_updates : true,
+            organizer_email: args.organizer_email,
+            time_zone: args.time_zone || timeZone,
+            bufferMinutes: nodeData.calendarBufferMinutes || 0
           };
 
           result = await googleCalendarService.createCalendarEvent(
@@ -9332,102 +10759,372 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
             const eventDate = new Date(eventData.start.dateTime).toLocaleString();
             const duration = args.duration_minutes || args.duration || 30;
 
-            successMessage = `¡Perfecto! He agendado tu cita.\n\n` +
+            successMessage = `Perfect! I've scheduled your appointment.\n\n` +
               `${eventData.summary}\n` +
               `${eventDate}\n` +
-              `Duración: ${duration} minutos`;
+              `Duration: ${duration} minutes`;
 
             if (eventData.location) {
-              successMessage += `\nUbicación: ${eventData.location}`;
+              successMessage += `\nLocation: ${eventData.location}`;
             }
 
             if (result.eventLink) {
-              successMessage += `\n\nEnlace del evento: ${result.eventLink}`;
+              successMessage += `\n\nEvent link: ${result.eventLink}`;
             }
           } else {
-            throw new Error(result.error || 'Error al agendar la cita');
+
+            const errorMsg = result.error || 'Error scheduling appointment';
+            if (errorMsg.includes('not available') || errorMsg.includes('conflict')) {
+              throw new Error("I'm sorry, but that time slot is already booked. Would you like me to check available time slots for that day, or would you prefer a different time?");
+            }
+            throw new Error(errorMsg);
           }
           break;
 
         case 'update_calendar_event':
 
+          let updateEventId = args.event_id || args.eventId;
+
+          if (!updateEventId && (args.date || args.start_datetime)) {
+            try {
+
+              let searchDate: string;
+              let searchTime: string;
+
+              if (args.date && args.time) {
+                searchDate = args.date;
+                searchTime = args.time;
+              } else if (args.start_datetime) {
+                const dateTime = new Date(args.start_datetime);
+                searchDate = dateTime.toISOString().split('T')[0];
+                searchTime = dateTime.toTimeString().split(' ')[0].substring(0, 5);
+              } else {
+                throw new Error('Unable to determine date/time for event lookup');
+              }
+
+              const attendeeEmail = args.attendee_email || (args.attendees && args.attendees[0]?.email) || contact.email;
+              const findResult = await googleCalendarService.findAppointmentByDateTime(
+                userId,
+                companyId,
+                searchDate,
+                searchTime,
+                attendeeEmail
+              );
+
+              if (findResult.success && findResult.eventId) {
+                updateEventId = findResult.eventId;
+              } else {
+
+                const clarificationMessage = `I couldn't find an appointment at ${searchDate} ${searchTime}. Could you please provide more details or check your calendar?`;
+                await this.sendMessageThroughChannel(
+                  channelConnection,
+                  contact,
+                  clarificationMessage,
+                  conversation,
+                  true
+                );
+                return;
+              }
+            } catch (findError) {
+              console.error('Error finding event by date/time:', findError);
+              const errorMessage = `I need the event ID to update the appointment. Please provide the event ID or specify the exact date and time of the appointment you want to update.`;
+              await this.sendMessageThroughChannel(
+                channelConnection,
+                contact,
+                errorMessage,
+                conversation,
+                true
+              );
+              return;
+            }
+          }
+
+          if (!updateEventId) {
+            const errorMessage = `I need either an event ID or the date/time of the appointment to update it. Please provide this information.`;
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
+              errorMessage,
+              conversation,
+              true
+            );
+            return;
+          }
+
           const updateData = {
             summary: args.title || args.summary,
             description: args.description || '',
             location: args.location || '',
-            start: {
+            start: args.start_datetime || args.start_time || args.startDateTime ? {
               dateTime: args.start_datetime || args.start_time || args.startDateTime,
-              timeZone: timeZone
-            },
-            end: {
+              timeZone: args.time_zone || timeZone
+            } : undefined,
+            end: args.end_datetime || args.end_time || args.endDateTime ? {
               dateTime: args.end_datetime || args.end_time || args.endDateTime,
-              timeZone: timeZone
-            },
-            attendees: args.attendees || []
+              timeZone: args.time_zone || timeZone
+            } : undefined,
+            attendees: args.attendees,
+            send_updates: args.send_updates !== undefined ? args.send_updates : true,
+            time_zone: args.time_zone || timeZone
           };
 
           result = await googleCalendarService.updateCalendarEvent(
             userId,
             companyId,
-            args.event_id || args.eventId,
+            updateEventId,
             updateData
           );
 
           if (result.success) {
-            const newEventDate = new Date(updateData.start.dateTime).toLocaleString();
-            successMessage = `¡Excelente! He actualizado tu cita.\n\n` +
-              `${updateData.summary}\n` +
-              `Nueva hora: ${newEventDate}`;
+            const newEventDate = updateData.start ? new Date(updateData.start.dateTime).toLocaleString() : 'updated time';
+            successMessage = `Excellent! I've updated your appointment.\n\n` +
+              `${updateData.summary || 'Your appointment'}\n` +
+              `New time: ${newEventDate}`;
           } else {
-            throw new Error(result.error || 'Error al actualizar la cita');
+            throw new Error(result.error || 'Error updating appointment');
           }
           break;
 
         case 'cancel_calendar_event':
 
+
+
+          let cancelEventId = args.event_id || args.eventId;
+
+          if (!cancelEventId) {
+
+            let searchDate: string | undefined = args.date;
+            let searchTime: string | undefined = args.time;
+            let attendeeEmail: string | undefined = args.attendee_email || (args.attendees && args.attendees[0]?.email);
+
+
+
+
+            if (searchDate && !searchTime && (searchDate.includes(',') || searchDate.includes(' '))) {
+
+              const parsed = this.parseDateTimeString(searchDate);
+
+              if (parsed.date && parsed.time) {
+                searchDate = parsed.date;
+                searchTime = parsed.time;
+
+              } else {
+                console.warn('[cancel_calendar_event] Failed to parse combined string. Date:', parsed.date, 'Time:', parsed.time);
+              }
+            }
+
+
+            if ((!searchDate || !searchTime) && conversationHistory) {
+              const recentBooking = this.extractRecentBookingFromHistory(conversationHistory, 24);
+              if (recentBooking) {
+
+                searchDate = searchDate || recentBooking.date;
+                searchTime = searchTime || recentBooking.time;
+                attendeeEmail = attendeeEmail || recentBooking.attendee_email;
+              }
+            }
+
+
+            if (searchDate || args.start_datetime) {
+              try {
+
+                if (!searchDate && args.start_datetime) {
+                  const dateTime = new Date(args.start_datetime);
+                  searchDate = dateTime.toISOString().split('T')[0];
+                  searchTime = dateTime.toTimeString().split(' ')[0].substring(0, 5);
+                }
+
+
+                if (searchDate) {
+                  const normalizedDate = this.normalizeDateFormat(searchDate);
+                  if (normalizedDate) {
+
+                    searchDate = normalizedDate;
+                  } else {
+                    console.warn('[cancel_calendar_event] Failed to normalize date:', searchDate);
+                  }
+                }
+
+                if (searchTime) {
+                  const normalizedTime = this.normalizeTimeFormat(searchTime);
+                  if (normalizedTime) {
+
+                    searchTime = normalizedTime;
+                  } else {
+                    console.warn('[cancel_calendar_event] Failed to normalize time:', searchTime);
+                  }
+                }
+
+                if (!searchDate || !searchTime) {
+                  throw new Error('Unable to determine date/time for event lookup');
+                }
+
+
+                attendeeEmail = attendeeEmail || contact.email || undefined;
+
+                
+
+                const findResult = await googleCalendarService.findAppointmentByDateTime(
+                  userId,
+                  companyId,
+                  searchDate,
+                  searchTime,
+                  attendeeEmail,
+                  timeZone
+                );
+
+
+
+                if (findResult.success && findResult.eventId) {
+                  cancelEventId = findResult.eventId;
+
+                } else {
+
+                  const clarificationMessage = `I couldn't find an appointment at ${searchDate} ${searchTime}. Could you please provide more details or check your calendar?`;
+
+                  await this.sendMessageThroughChannel(
+                    channelConnection,
+                    contact,
+                    clarificationMessage,
+                    conversation,
+                    true
+                  );
+                  return;
+                }
+              } catch (findError) {
+                console.error('Error finding event by date/time:', findError);
+                const errorMessage = `I need the event ID to cancel the appointment. Please provide the event ID or specify the exact date and time of the appointment you want to cancel.`;
+                await this.sendMessageThroughChannel(
+                  channelConnection,
+                  contact,
+                  errorMessage,
+                  conversation,
+                  true
+                );
+                return;
+              }
+            }
+          }
+
+          if (!cancelEventId) {
+            const errorMessage = `I need either an event ID or the date/time of the appointment to cancel it. Please provide this information.`;
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
+              errorMessage,
+              conversation,
+              true
+            );
+            return;
+          }
+
+          const sendUpdates = args.send_updates !== undefined ? args.send_updates : true;
+
           result = await googleCalendarService.deleteCalendarEvent(
             userId,
             companyId,
-            args.event_id || args.eventId
+            cancelEventId,
+            sendUpdates
           );
 
           if (result.success) {
-            successMessage = `¡Listo! He cancelado tu cita.`;
+            successMessage = `Done! I've cancelled your appointment.`;
           } else {
-            throw new Error(result.error || 'Error al cancelar la cita');
+            throw new Error(result.error || 'Error cancelling appointment');
           }
           break;
 
         case 'list_calendar_events':
 
-          const startDateTime = args.start_date ? `${args.start_date}T00:00:00Z` : args.time_min || args.timeMin;
-          const endDateTime = args.end_date ? `${args.end_date}T23:59:59Z` : args.time_max || args.timeMax;
+          const requesterEmail = contact.email || undefined;
+
+
+          let normalizedStartDate = args.start_date;
+          let normalizedEndDate = args.end_date;
+
+          if (normalizedStartDate) {
+            const normalized = this.normalizeDateFormat(normalizedStartDate);
+            if (normalized) {
+
+              normalizedStartDate = normalized;
+            }
+          }
+
+          if (normalizedEndDate) {
+            const normalized = this.normalizeDateFormat(normalizedEndDate);
+            if (normalized) {
+
+              normalizedEndDate = normalized;
+            }
+          }
+
+          let startDateTime = normalizedStartDate ? `${normalizedStartDate}T00:00:00Z` : args.time_min || args.timeMin;
+          let endDateTime = normalizedEndDate ? `${normalizedEndDate}T23:59:59Z` : args.time_max || args.timeMax;
+
+
+          let usingDefaultRange = false;
+          if (!startDateTime || !endDateTime) {
+            const now = new Date();
+            const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            const thirtyDaysLater = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            startDateTime = startDateTime || thirtyDaysAgo.toISOString();
+            endDateTime = endDateTime || thirtyDaysLater.toISOString();
+            usingDefaultRange = true;
+
+
+          }
 
           result = await googleCalendarService.listCalendarEvents(
             userId,
             companyId,
             startDateTime,
             endDateTime,
-            args.max_results || args.maxResults || 10
+            args.max_results || args.maxResults || 10,
+            requesterEmail
           );
 
           if (result.success) {
             const events = result.items || [];
             if (events.length > 0) {
-              const eventList = events.map((event: any) =>
-                `• ${event.summary} - ${new Date(event.start.dateTime).toLocaleString()}`
-              ).join('\n');
-              successMessage = `Tus próximas citas:\n${eventList}`;
+
+              const eventList = events.map((event: any) => {
+                let eventSummary = `• ${event.summary} - ${new Date(event.start.dateTime).toLocaleString()}`;
+
+
+                if (requesterEmail && event.attendees && Array.isArray(event.attendees)) {
+                  const isRequesterInvolved =
+                    event.organizer?.email === requesterEmail ||
+                    event.attendees.some((attendee: any) =>
+                      attendee.email?.toLowerCase() === requesterEmail.toLowerCase()
+                    );
+
+                  if (isRequesterInvolved) {
+                    const attendeeNames = event.attendees
+                      .map((a: any) => a.email || a.displayName)
+                      .filter(Boolean)
+                      .join(', ');
+                    if (attendeeNames) {
+                      eventSummary += `\n  Asistentes: ${attendeeNames}`;
+                    }
+                  }
+                }
+
+                return eventSummary;
+              }).join('\n');
+              successMessage = `Your upcoming appointments:\n${eventList}`;
             } else {
-              successMessage = 'No se encontraron citas para el período especificado.';
+              successMessage = usingDefaultRange
+                ? 'No appointments found in the last/next 30 days.'
+                : 'No appointments found for the specified period.';
             }
           } else {
-            throw new Error(result.error || 'Error al listar las citas');
+            throw new Error(result.error || 'Error listing appointments');
           }
           break;
 
         default:
-          throw new Error(`Función de calendario desconocida: ${name}`);
+          throw new Error(`Unknown calendar function: ${name}`);
       }
 
       if (successMessage) {
@@ -9522,7 +11219,8 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
               dateTime: args.end_datetime || args.end_time || args.endDateTime,
               timeZone: timeZone
             },
-            attendees: args.attendee_emails || args.attendees || []
+            attendees: args.attendee_emails || args.attendees || [],
+            bufferMinutes: nodeData.calendarBufferMinutes || 0
           };
 
           result = await zohoCalendarService.createCalendarEvent(
@@ -9548,7 +11246,12 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
               successMessage += `\n\nEvent link: ${result.eventLink}`;
             }
           } else {
-            throw new Error(result.error || 'Error scheduling appointment');
+
+            const errorMsg = result.error || 'Error scheduling appointment';
+            if (errorMsg.includes('not available') || errorMsg.includes('conflict')) {
+              throw new Error("I'm sorry, but that time slot is already booked. Would you like me to check available time slots for that day, or would you prefer a different time?");
+            }
+            throw new Error(errorMsg);
           }
           break;
 
@@ -9737,13 +11440,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
           await storage.createMessage(insertMessage);
 
-          if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-            await whatsAppService.sendMessage(
-              channelConnection.id,
-              channelConnection.userId,
-              contact.identifier,
-              context.replaceVariables(handoffMessage)
+
+          try {
+            await this.sendMessageThroughChannel(
+              channelConnection,
+              contact,
+              context.replaceVariables(handoffMessage),
+              conversation,
+              true
             );
+          } catch (error) {
+            console.error('Error sending handoff message through channel:', error);
           }
         }
 
@@ -9814,13 +11521,17 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
 
         await storage.createMessage(insertMessage);
 
-        if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-          await whatsAppService.sendMessage(
-            channelConnection.id,
-            channelConnection.userId,
-            contact.identifier,
-            confirmationMessage
+
+        try {
+          await this.sendMessageThroughChannel(
+            channelConnection,
+            contact,
+            confirmationMessage,
+            conversation,
+            true
           );
+        } catch (error) {
+          console.error('Error sending confirmation message through channel:', error);
         }
       }
 
@@ -11481,54 +13192,14 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
         const translationText = `🌐 Translation: ${translationResult.translatedText}`;
 
         try {
-          if ((channelConnection.channelType === 'whatsapp' || channelConnection.channelType === 'whatsapp_unofficial') && contact.identifier) {
-            const whatsAppService = (await import('./channels/whatsapp')).default;
 
-            if (channelConnection.channelType === 'whatsapp_unofficial') {
-              await whatsAppService.sendMessage(
-                channelConnection.id,
-                channelConnection.userId,
-                contact.identifier,
-                translationText,
-                true,
-                conversation.id
-              );
-            } else {
-              await whatsAppService.sendWhatsAppMessage(
-                channelConnection.id,
-                channelConnection.userId,
-                contact.identifier,
-                translationText,
-                true,
-                conversation.id
-              );
-            }
-          } else {
-
-            const insertTranslationMessage = {
-              conversationId: conversation.id,
-              contactId: contact.id,
-              channelType: channelConnection.channelType,
-              type: 'text',
-              content: translationText,
-              direction: 'outbound',
-              status: 'sent',
-              isFromBot: true,
-              mediaUrl: null,
-              timestamp: new Date(),
-              metadata: JSON.stringify({
-                isTranslation: true,
-                originalText: message.content,
-                detectedLanguage: translationResult.detectedLanguage,
-                targetLanguage: targetLanguage,
-                nodeId: node.id
-              })
-            };
-
-            await storage.createMessage(insertTranslationMessage);
-          }
-
-
+          await this.sendMessageThroughChannel(
+            channelConnection,
+            contact,
+            translationText,
+            conversation,
+            true
+          );
         } catch (sendError) {
           console.error('Translation Node: Error sending translation message:', sendError);
           context.setVariable('translation.sendError', sendError instanceof Error ? sendError.message : 'Unknown error');
@@ -11550,11 +13221,14 @@ ${eventResult.eventLink ? `\nView event: ${eventResult.eventLink}` : ''}`;
     conversation: Conversation
   ): Promise<void> {
     try {
+      
 
       const { sendInteractiveMessage } = await import('./channels/whatsapp-official');
 
 
       const result = await sendInteractiveMessage(channelConnection.id, interactiveMessage);
+
+
 
 
       const insertMessage = {

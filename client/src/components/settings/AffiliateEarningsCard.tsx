@@ -7,6 +7,7 @@ import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
 import { apiRequest } from '@/lib/queryClient';
+import { useCurrency } from '@/contexts/currency-context';
 import { 
   DollarSign, 
   TrendingUp, 
@@ -50,6 +51,7 @@ interface AffiliateTransaction {
 export function AffiliateEarningsCard() {
   const { t } = useTranslation();
   const { toast } = useToast();
+  const { formatCurrency } = useCurrency();
   const [showTransactions, setShowTransactions] = useState(false);
 
 
@@ -89,12 +91,6 @@ export function AffiliateEarningsCard() {
     retry: false
   });
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD'
-    }).format(amount);
-  };
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-US', {

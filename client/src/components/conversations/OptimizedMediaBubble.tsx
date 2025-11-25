@@ -32,9 +32,17 @@ export default function OptimizedMediaBubble({
 
   const checkMediaSize = async (url: string) => {
     try {
-      const response = await fetch(url, { method: 'HEAD' });
+
+      const response = await fetch(url, {
+        method: 'HEAD',
+        cache: 'no-cache',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      });
       const contentLength = response.headers.get('content-length');
-      
+
       if (contentLength) {
         const size = parseInt(contentLength, 10);
         setMediaSize(size);
@@ -112,6 +120,8 @@ export default function OptimizedMediaBubble({
                   alt={t('message_bubble.image_message', 'Image message')}
                   className="max-w-full rounded-md object-contain"
                   style={{ maxHeight: '240px' }}
+                  crossOrigin="anonymous"
+                  loading="eager"
                   onError={(e) => {
                     e.currentTarget.style.display = 'none';
                     e.currentTarget.parentElement?.classList.add('flex', 'items-center', 'justify-center', 'h-40');
@@ -166,10 +176,12 @@ export default function OptimizedMediaBubble({
         if (shouldAutoLoad && mediaUrl) {
           return (
             <div className="message-media">
-              <video 
-                controls 
-                className="max-w-full rounded-md" 
+              <video
+                controls
+                className="max-w-full rounded-md"
                 style={{ maxHeight: '240px' }}
+                crossOrigin="anonymous"
+                preload="metadata"
               >
                 <source src={mediaUrl} type="video/mp4" />
                 {t('message_bubble.video_not_supported', 'Your browser does not support the video element.')}
@@ -242,7 +254,7 @@ export default function OptimizedMediaBubble({
 
           return (
             <div className="message-media">
-              <audio controls className="max-w-full">
+              <audio controls className="max-w-full" crossOrigin="anonymous" preload="metadata">
                 <source src={mediaUrl} type={audioMimeType} />
                 {/* Fallback sources for better compatibility */}
                 <source src={mediaUrl} type="audio/mpeg" />
@@ -348,6 +360,8 @@ export default function OptimizedMediaBubble({
                 src={mediaUrl}
                 alt={t('message_bubble.sticker', 'Sticker')}
                 className="max-w-[120px] max-h-[120px]"
+                crossOrigin="anonymous"
+                loading="eager"
               />
             </div>
           );

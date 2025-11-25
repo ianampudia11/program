@@ -7,9 +7,9 @@ export function useChannelConnections() {
 
   return useQuery<ChannelConnection[]>({
     queryKey: ['/api/channel-connections', company?.id],
-    staleTime: 1000 * 60 * 2,
-    refetchOnWindowFocus: true,
-    refetchOnReconnect: true,
+    staleTime: 1000 * 60 * 5, // Increase stale time to 5 minutes
+    refetchOnWindowFocus: false, // Disable to prevent excessive refetching
+    refetchOnReconnect: false, // Disable to prevent excessive refetching
     enabled: !!company?.id && !!user, // Only run query when company and user are available
     retry: (failureCount, error: any) => {
 

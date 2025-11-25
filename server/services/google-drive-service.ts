@@ -1,5 +1,6 @@
 import { google } from 'googleapis';
 import fs from 'fs/promises';
+import { createReadStream } from 'fs';
 import path from 'path';
 import { storage } from '../storage';
 
@@ -98,23 +99,85 @@ export class GoogleDriveService {
   }
 
   private async refreshAccessToken(): Promise<void> {
-    try {
-      const { credentials } = await this.oauth2Client.refreshAccessToken();
-      this.oauth2Client.setCredentials(credentials);
+    const maxRetries = 3;
+    const retryDelays = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
 
-      const config = await storage.getAppSetting('backup_config');
-      const configValue = config?.value as any;
-      const updatedConfig = {
-        ...configValue || {},
-        google_drive: {
-          ...configValue?.google_drive || {},
-          credentials
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+
+
+
+
+        const { token } = await this.oauth2Client.getAccessToken();
+
+        if (!token) {
+          throw new Error('Failed to obtain access token');
         }
-      };
-      await storage.saveAppSetting('backup_config', updatedConfig);
-    } catch (error) {
-      console.error('Error refreshing access token:', error);
-      throw error;
+
+
+        const credentials = this.oauth2Client.credentials;
+
+
+
+
+        const config = await storage.getAppSetting('backup_config');
+        const configValue = config?.value as any;
+        const updatedConfig = {
+          ...configValue || {},
+          google_drive: {
+            ...configValue?.google_drive || {},
+            credentials
+          }
+        };
+        await storage.saveAppSetting('backup_config', updatedConfig);
+
+
+        return; // Success, exit retry loop
+
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`[GoogleDrive] Token refresh attempt ${attempt + 1} failed:`, errorMessage);
+
+
+        const isPersistentFailure =
+          errorMessage.includes('invalid_grant') ||
+          errorMessage.includes('Token has been expired or revoked') ||
+          errorMessage.includes('invalid refresh token');
+
+        if (isPersistentFailure) {
+          console.error('[GoogleDrive] Persistent authentication failure detected. Clearing stored credentials.');
+
+
+          try {
+            const config = await storage.getAppSetting('backup_config');
+            const configValue = config?.value as any;
+            const updatedConfig = {
+              ...configValue || {},
+              google_drive: {
+                ...configValue?.google_drive || {},
+                credentials: null // Clear credentials
+              }
+            };
+            await storage.saveAppSetting('backup_config', updatedConfig);
+
+          } catch (clearError) {
+            console.error('[GoogleDrive] Failed to clear credentials:', clearError);
+          }
+
+          throw new Error('Google Drive authentication failed. Please re-authenticate in the backup settings.');
+        }
+
+
+        if (attempt < maxRetries - 1) {
+          const delay = retryDelays[attempt];
+
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+
+          console.error('[GoogleDrive] All token refresh attempts failed');
+          throw new Error(`Failed to refresh Google Drive access token after ${maxRetries} attempts: ${errorMessage}`);
+        }
+      }
     }
   }
 
@@ -145,7 +208,7 @@ export class GoogleDriveService {
 
   private async ensureBackupFolder(): Promise<string> {
     try {
-      const folderName = 'BotHive Backups';
+      const folderName = 'PowerChat Backups';
 
       const response = await this.drive.files.list({
         q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
@@ -185,37 +248,97 @@ export class GoogleDriveService {
   }
 
   async uploadBackup(filePath: string, filename: string): Promise<{ fileId: string; size: number }> {
-    try {
-      await this.initializeDrive();
-      const folderId = await this.ensureBackupFolder();
+    const maxRetries = 3;
+    const baseDelay = 1000; // 1 second
 
-      const fileStream = await fs.readFile(filePath);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this.initializeDrive();
+        const folderId = await this.ensureBackupFolder();
 
-      
 
-      const response = await this.drive.files.create({
-        requestBody: {
-          name: filename,
-          parents: [folderId],
-          description: `BotHive database backup created on ${new Date().toISOString()}`
-        },
-        media: {
-          mimeType: 'application/octet-stream',
-          body: fileStream
-        },
-        fields: 'id, size'
-      });
+        const stats = await fs.stat(filePath);
+        const fileSize = stats.size;
 
-      
 
-      return {
-        fileId: response.data.id,
-        size: parseInt(response.data.size || '0')
-      };
-    } catch (error) {
-      console.error('Error uploading backup to Google Drive:', error);
-      throw error;
+
+
+        const fileStream = createReadStream(filePath);
+
+
+        let uploadedBytes = 0;
+        let lastLoggedPercent = 0;
+
+        fileStream.on('data', (chunk) => {
+          uploadedBytes += chunk.length;
+          const percent = Math.floor((uploadedBytes / fileSize) * 100);
+
+
+          if (percent >= lastLoggedPercent + 10) {
+
+            lastLoggedPercent = percent;
+          }
+        });
+
+
+        const response = await this.drive.files.create({
+          requestBody: {
+            name: filename,
+            parents: [folderId],
+            description: `PowerChat database backup created on ${new Date().toISOString()}`
+          },
+          media: {
+            mimeType: 'application/octet-stream',
+            body: fileStream
+          },
+          fields: 'id, size',
+
+          supportsAllDrives: true
+        }, {
+
+          onUploadProgress: (evt: any) => {
+            if (evt.bytesRead) {
+              const percent = Math.floor((evt.bytesRead / fileSize) * 100);
+              if (percent >= lastLoggedPercent + 10) {
+
+                lastLoggedPercent = percent;
+              }
+            }
+          }
+        });
+
+
+
+        return {
+          fileId: response.data.id || '',
+          size: parseInt(response.data.size || '0')
+        };
+
+      } catch (error: any) {
+        console.error(`[Google Drive Upload] Attempt ${attempt}/${maxRetries} failed:`, error);
+
+
+        const isRetryable =
+          error.code === 'ECONNRESET' ||
+          error.code === 'ETIMEDOUT' ||
+          error.code === 'ENOTFOUND' ||
+          (error.response && [429, 500, 502, 503, 504].includes(error.response.status));
+
+        if (attempt < maxRetries && isRetryable) {
+
+          const delay = baseDelay * Math.pow(2, attempt - 1);
+
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
+
+        console.error('[Google Drive Upload] Upload failed after all retries');
+        throw error;
+      }
     }
+
+    throw new Error('Upload failed after maximum retries');
   }
 
   async downloadBackup(filename: string, localPath: string): Promise<void> {

@@ -16,7 +16,8 @@ import {
   type ContactSegment,
   type InsertCampaign,
   type InsertCampaignTemplate,
-  type InsertContactSegment
+  type InsertContactSegment,
+  type SegmentFilterCriteria
 } from '../../shared/schema';
 
 interface CampaignFilters {
@@ -208,21 +209,28 @@ export class CampaignService {
 
   async startCampaign(companyId: number, campaignId: number): Promise<{ success: boolean; message: string }> {
     try {
+
+
       const campaign = await this.getCampaignById(companyId, campaignId);
+
 
       if (campaign.status !== 'draft' && campaign.status !== 'scheduled') {
         throw new Error('Campaign cannot be started from current status');
       }
+
 
       await this.updateCampaign(companyId, campaignId, {
         status: 'running',
         startedAt: new Date()
       });
 
-      await this.queueCampaignRecipients(campaignId);
+
+      const queuedCount = await this.queueCampaignRecipients(campaignId);
+
 
       return { success: true, message: 'Campaign started successfully' };
     } catch (error) {
+      console.error(`[Campaign Service] Error starting campaign:`, error);
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to start campaign: ${errorMessage}`);
     }
@@ -272,6 +280,16 @@ export class CampaignService {
   }
 
 
+  /**
+   * Populates campaign recipients based on a segment.
+   * 
+   * IMPORTANT: Segments are dynamic criteria filters, not static contact lists.
+   * This method calls getContactsBySegment with the current segment.criteria,
+   * which means contact membership is recalculated each time based on current data.
+   * Using the same segment for new campaigns will re-evaluate contacts and can
+   * change the audience implicitly if contact data has changed since the segment
+   * was created.
+   */
   async populateCampaignRecipients(campaignId: number, segmentId: number): Promise<number> {
     try {
       const [segment] = await db.select()
@@ -341,24 +359,27 @@ export class CampaignService {
     }
   }
 
+  /**
+   * Gets contacts matching a segment's criteria.
+   * 
+   * IMPORTANT: Segments are dynamic filters, not static contact lists. This method
+   * evaluates the segment's criteria against current contact data each time it's called.
+   * Contact membership is recalculated based on current tags, dates, and other filters.
+   * 
+   * Note: Results are deduplicated by normalized phone number, which may reduce
+   * the apparent number of contacts compared to raw filter matches.
+   */
   async getContactsBySegment(segment: ContactSegment): Promise<any[]> {
     try {
-      const criteria = segment.criteria as any;
+      const criteria = segment.criteria as SegmentFilterCriteria;
 
       let whereConditions = [
         eq(contacts.companyId, segment.companyId),
         eq(contacts.isActive, true)
       ];
 
-
-
-      if (criteria.contactIds && criteria.contactIds.length > 0) {
-        whereConditions.push(inArray(contacts.id, criteria.contactIds));
-      } else {
-
-        whereConditions.push(sql`${contacts.phone} IS NOT NULL AND ${contacts.phone} != ''`);
-        whereConditions.push(sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) <= 14`);
-      }
+      whereConditions.push(sql`${contacts.phone} IS NOT NULL AND ${contacts.phone} != ''`);
+      whereConditions.push(sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) <= 14`);
 
 
       const tagCondition = this.createTagFilterCondition(criteria.tags);
@@ -384,6 +405,8 @@ export class CampaignService {
         .where(and(...whereConditions))
         .orderBy(desc(contacts.createdAt));
 
+
+
       const deduplicatedContacts = this.deduplicateContactsByPhone(allContacts);
 
       return deduplicatedContacts;
@@ -395,22 +418,15 @@ export class CampaignService {
 
   async getContactsBySegmentWithDetails(segment: ContactSegment, limit: number = 50): Promise<any[]> {
     try {
-      const criteria = segment.criteria as any;
+      const criteria = segment.criteria as SegmentFilterCriteria;
 
       let whereConditions = [
         eq(contacts.companyId, segment.companyId),
         eq(contacts.isActive, true)
       ];
 
-
-
-      if (criteria.contactIds && criteria.contactIds.length > 0) {
-        whereConditions.push(inArray(contacts.id, criteria.contactIds));
-      } else {
-
-        whereConditions.push(sql`${contacts.phone} IS NOT NULL AND ${contacts.phone} != ''`);
-        whereConditions.push(sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) <= 14`);
-      }
+      whereConditions.push(sql`${contacts.phone} IS NOT NULL AND ${contacts.phone} != ''`);
+      whereConditions.push(sql`LENGTH(REGEXP_REPLACE(${contacts.phone}, '[^0-9]', '', 'g')) <= 14`);
 
 
       const tagCondition = this.createTagFilterCondition(criteria.tags);
@@ -457,6 +473,8 @@ export class CampaignService {
         )
         .orderBy(desc(contacts.createdAt));
 
+
+
       const deduplicatedContacts = this.deduplicateContactsByPhone(contactsWithActivity);
 
       const limitedContacts = deduplicatedContacts.slice(0, limit);
@@ -479,10 +497,10 @@ export class CampaignService {
 
   /**
    * Creates a SQL condition for tag filtering with improved null handling and case-insensitive matching
-   * @param tags Array of tags to filter by
+   * @param tags Array of tags to filter by (can be undefined)
    * @returns SQL condition or null if no valid tags
    */
-  private createTagFilterCondition(tags: string[]) {
+  private createTagFilterCondition(tags: string[] | undefined) {
     try {
       if (!tags || tags.length === 0) {
         return null;
@@ -546,6 +564,15 @@ export class CampaignService {
     }
   }
 
+  /**
+   * Deduplicates contacts by normalized phone number.
+   * 
+   * Only one contact per normalized phone number is retained. If multiple contacts
+   * share the same normalized phone, the most recently created contact is kept.
+   * 
+   * This affects all segment-based audience building and may reduce the apparent
+   * number of contacts compared to raw filter matches.
+   */
   private deduplicateContactsByPhone(contacts: any[]): any[] {
     const phoneMap = new Map();
 
@@ -615,12 +642,16 @@ export class CampaignService {
 
   async queueCampaignRecipients(campaignId: number): Promise<number> {
     try {
+
+
       const recipients = await db.select()
         .from(campaignRecipients)
         .where(and(
           eq(campaignRecipients.campaignId, campaignId),
           eq(campaignRecipients.status, 'pending')
         ));
+
+
 
       const campaign = await db.select()
         .from(campaigns)
@@ -630,8 +661,25 @@ export class CampaignService {
         throw new Error('Campaign not found');
       }
 
-      const rateLimits = (campaign[0].rateLimitSettings as any) || {};
-      const antiBanSettings = (campaign[0].antiBanSettings as any) || {};
+      const campaignData = campaign[0];
+
+
+
+      const channelIds = (campaignData.channelIds as number[]) || [];
+      const singleChannelId = campaignData.channelId;
+
+
+      const availableChannelIds = channelIds.length > 0 ? channelIds : (singleChannelId ? [singleChannelId] : []);
+
+      if (availableChannelIds.length === 0) {
+        console.error(`[Campaign Service] No channel connections found for campaign ${campaignId}`);
+        throw new Error('No channel connections configured for this campaign');
+      }
+
+
+
+      const rateLimits = (campaignData.rateLimitSettings as any) || {};
+      const antiBanSettings = (campaignData.antiBanSettings as any) || {};
       const delayBetweenMessages = rateLimits.delay_between_messages || 6;
       const randomDelayRange = rateLimits.random_delay_range || [3, 10];
 
@@ -664,22 +712,30 @@ export class CampaignService {
 
         const scheduledFor = new Date(Date.now() + (baseDelay + randomDelay) * 1000);
 
+
+        const assignedChannelId = availableChannelIds[index % availableChannelIds.length];
+
         return {
           campaignId,
           recipientId: recipient.id,
-          accountId: null,
+          accountId: assignedChannelId, // FIXED: Assign actual channel ID instead of null
           scheduledFor,
           priority: 1,
           status: 'pending' as const
         };
       });
 
+
+
+
       if (queueItems.length > 0) {
         await db.insert(campaignQueue).values(queueItems);
+
       }
 
       return queueItems.length;
     } catch (error) {
+      console.error(`[Campaign Service] Error queueing recipients:`, error);
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to queue recipients: ${errorMessage}`);
     }
@@ -958,7 +1014,7 @@ export class CampaignService {
 
   async createSegment(companyId: number, userId: number, segmentData: Partial<InsertContactSegment>, excludedContactIds?: number[]): Promise<ContactSegment & { contactCount: number }> {
     try {
-      const criteria = (segmentData.criteria as any) || {};
+      const criteria = (segmentData.criteria as SegmentFilterCriteria) || {};
 
 
       if (criteria.tags && Array.isArray(criteria.tags)) {
@@ -1037,9 +1093,21 @@ export class CampaignService {
       }
 
 
+
       let sanitizedUpdateData = { ...updateData };
-      if (updateData.criteria) {
-        const criteria = updateData.criteria as any;
+      const updateDataAny = updateData as any;
+      
+      if (updateData.criteria || updateDataAny.excludedContactIds !== undefined) {
+        const criteria = (updateData.criteria as any) || { ...(existingSegment.criteria as any) };
+        
+
+        if (updateDataAny.excludedContactIds !== undefined) {
+          criteria.excludedContactIds = updateDataAny.excludedContactIds || [];
+        } else if (!criteria.excludedContactIds) {
+          criteria.excludedContactIds = [];
+        }
+        
+
         if (criteria.tags && Array.isArray(criteria.tags)) {
           criteria.tags = criteria.tags
             .filter((tag: any) => tag && typeof tag === 'string' && tag.trim().length > 0)
@@ -1047,7 +1115,11 @@ export class CampaignService {
             .filter((tag: string) => tag.length <= 100)
             .slice(0, 50);
         }
+        
         sanitizedUpdateData.criteria = criteria;
+        
+
+        delete (sanitizedUpdateData as any).excludedContactIds;
       }
 
       const [segment] = await db.update(contactSegments)
@@ -1123,7 +1195,6 @@ export class CampaignService {
       return 0;
     }
   }
-
 
   async getCampaignAnalytics(_companyId: number, campaignId: number): Promise<any> {
     try {

@@ -59,7 +59,11 @@ export function serveStatic(app: Express) {
     }
   }
 
-  app.use(express.static(distPath));
+
+  app.use('/public', express.static(distPath, { maxAge: '1h', etag: true, lastModified: true }));
+
+
+  app.use(express.static(distPath, { maxAge: '1h', etag: true, lastModified: true }));
 
 
   app.use("*", (req, res, next) => {

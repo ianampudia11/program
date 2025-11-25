@@ -214,6 +214,8 @@ export const PERMISSIONS = {
   VIEW_PAGES: 'view_pages',
   MANAGE_PAGES: 'manage_pages',
 
+  VIEW_TASKS: 'view_tasks',
+  MANAGE_TASKS: 'manage_tasks',
 
   CREATE_BACKUPS: 'create_backups',
   RESTORE_BACKUPS: 'restore_backups',
@@ -253,6 +255,8 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     [PERMISSIONS.CONFIGURE_CHANNELS]: true,
     [PERMISSIONS.VIEW_PAGES]: true,
     [PERMISSIONS.MANAGE_PAGES]: true,
+    [PERMISSIONS.VIEW_TASKS]: true,
+    [PERMISSIONS.MANAGE_TASKS]: true,
     [PERMISSIONS.CREATE_BACKUPS]: true,
     [PERMISSIONS.RESTORE_BACKUPS]: true,
     [PERMISSIONS.MANAGE_BACKUPS]: true
@@ -289,6 +293,8 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     [PERMISSIONS.CONFIGURE_CHANNELS]: false,
     [PERMISSIONS.VIEW_PAGES]: false,
     [PERMISSIONS.MANAGE_PAGES]: false,
+    [PERMISSIONS.VIEW_TASKS]: true,
+    [PERMISSIONS.MANAGE_TASKS]: false,
     [PERMISSIONS.CREATE_BACKUPS]: false,
     [PERMISSIONS.RESTORE_BACKUPS]: false,
     [PERMISSIONS.MANAGE_BACKUPS]: false
@@ -303,10 +309,29 @@ export const channelTypes = z.enum([
   "messenger",
   "instagram",
   "email",
-  "telegram"
+  "telegram",
+  "tiktok",
+  "webchat",
+  "twilio_sms",
+  "twilio_voice"
 ]);
 
-
+export const whatsappProxyServers = pgTable("whatsapp_proxy_servers", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  name: text("name").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  type: text("type", { enum: ['http', 'https', 'socks5'] }).notNull(),
+  host: text("host").notNull(),
+  port: integer("port").notNull(),
+  username: text("username"),
+  password: text("password"),
+  testStatus: text("test_status", { enum: ['untested', 'working', 'failed'] }).default('untested'),
+  lastTested: timestamp("last_tested"),
+  description: text("description"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
 
 export const channelConnections = pgTable("channel_connections", {
   id: serial("id").primaryKey(),
@@ -326,6 +351,15 @@ export const channelConnections = pgTable("channel_connections", {
   historySyncTotal: integer("history_sync_total").default(0),
   lastHistorySyncAt: timestamp("last_history_sync_at"),
   historySyncError: text("history_sync_error"),
+  proxyServerId: integer("proxy_server_id").references(() => whatsappProxyServers.id, { onDelete: 'set null' }),
+  proxyEnabled: boolean("proxy_enabled").default(false),
+  proxyType: text("proxy_type", { enum: ['http', 'https', 'socks5'] }),
+  proxyHost: text("proxy_host"),
+  proxyPort: integer("proxy_port"),
+  proxyUsername: text("proxy_username"),
+  proxyPassword: text("proxy_password"),
+  proxyTestStatus: text("proxy_test_status", { enum: ['untested', 'working', 'failed'] }).default('untested'),
+  proxyLastTested: timestamp("proxy_last_tested"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow()
 });
@@ -335,6 +369,10 @@ export const partnerConfigurations = pgTable("partner_configurations", {
   provider: text("provider").notNull(),
   partnerApiKey: text("partner_api_key").notNull(),
   partnerId: text("partner_id").notNull(),
+  partnerSecret: text("partner_secret"),
+  webhookVerifyToken: text("webhook_verify_token"),
+  accessToken: text("access_token"),
+  configId: text("config_id"),
   partnerWebhookUrl: text("partner_webhook_url"),
   redirectUrl: text("redirect_url"),
   publicProfile: jsonb("public_profile"),
@@ -539,13 +577,57 @@ export const insertChannelConnectionSchema = createInsertSchema(channelConnectio
   historySyncProgress: true,
   historySyncTotal: true,
   lastHistorySyncAt: true,
-  historySyncError: true
+  historySyncError: true,
+  proxyServerId: true,
+  proxyEnabled: true,
+  proxyType: true,
+  proxyHost: true,
+  proxyPort: true,
+  proxyUsername: true,
+  proxyPassword: true,
+  proxyTestStatus: true,
+  proxyLastTested: true
+}).superRefine((data, ctx) => {
+
+  if (data.proxyEnabled === true) {
+    if (!data.proxyType) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['proxyType'],
+        message: 'Proxy type is required when proxy is enabled'
+      });
+    }
+    if (!data.proxyHost) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['proxyHost'],
+        message: 'Proxy host is required when proxy is enabled'
+      });
+    }
+    if (!data.proxyPort) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['proxyPort'],
+        message: 'Proxy port is required when proxy is enabled'
+      });
+    } else if (data.proxyPort < 1 || data.proxyPort > 65535) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['proxyPort'],
+        message: 'Proxy port must be between 1 and 65535'
+      });
+    }
+  }
 });
 
 export const insertPartnerConfigurationSchema = createInsertSchema(partnerConfigurations).pick({
   provider: true,
   partnerApiKey: true,
   partnerId: true,
+  partnerSecret: true,
+  webhookVerifyToken: true,
+  accessToken: true,
+  configId: true,
   partnerWebhookUrl: true,
   redirectUrl: true,
   publicProfile: true,
@@ -898,6 +980,27 @@ export const insertNoteSchema = createInsertSchema(notes).pick({
   content: true
 });
 
+
+export const calls = pgTable("calls", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").references(() => companies.id),
+  channelId: integer("channel_id").references(() => channelConnections.id),
+  contactId: integer("contact_id").references(() => contacts.id),
+  conversationId: integer("conversation_id").references(() => conversations.id),
+  direction: text("direction"), // 'inbound' | 'outbound'
+  status: text("status"), // 'ringing' | 'in-progress' | 'completed' | 'failed' | 'busy' | 'no-answer'
+  from: text("from"),
+  to: text("to"),
+  durationSec: integer("duration_sec"),
+  startedAt: timestamp("started_at"),
+  endedAt: timestamp("ended_at"),
+  recordingUrl: text("recording_url"),
+  recordingSid: text("recording_sid"),
+  twilioCallSid: text("twilio_call_sid"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow()
+});
+
 export type Company = typeof companies.$inferSelect;
 export type InsertCompany = z.infer<typeof insertCompanySchema>;
 
@@ -1029,6 +1132,7 @@ export const contactTasks = pgTable("contact_tasks", {
   assignedTo: text("assigned_to"),
   category: text("category"),
   tags: text("tags").array(),
+  backgroundColor: text("background_color").default('#ffffff'),
 
 
   createdBy: integer("created_by").references(() => users.id, { onDelete: 'set null' }),
@@ -1040,6 +1144,20 @@ export const contactTasks = pgTable("contact_tasks", {
 
 export type ContactTask = typeof contactTasks.$inferSelect;
 export type InsertContactTask = typeof contactTasks.$inferInsert;
+
+export const taskCategories = pgTable("task_categories", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  name: text("name").notNull(),
+  color: text("color"),
+  icon: text("icon"),
+  createdBy: integer("created_by").references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+
+export type TaskCategory = typeof taskCategories.$inferSelect;
+export type InsertTaskCategory = typeof taskCategories.$inferInsert;
 
 
 export const contactAuditLogs = pgTable("contact_audit_logs", {
@@ -1100,7 +1218,11 @@ export const flowNodeTypes = z.enum([
   'document',
   'wait',
   'whatsapp_interactive_buttons',
+  'whatsapp_interactive_list',
+  'whatsapp_cta_url',
+  'whatsapp_location_request',
   'whatsapp_poll',
+  'whatsapp_flows',
   'follow_up',
   'translation',
   'webhook',
@@ -1838,6 +1960,23 @@ export const insertCompanySettingsSchema = createInsertSchema(companySettings).p
   key: true,
   value: true
 });
+
+export const insertWhatsappProxyServerSchema = createInsertSchema(whatsappProxyServers).pick({
+  companyId: true,
+  name: true,
+  enabled: true,
+  type: true,
+  host: true,
+  port: true,
+  username: true,
+  password: true,
+  testStatus: true,
+  lastTested: true,
+  description: true
+});
+
+export type WhatsappProxyServer = typeof whatsappProxyServers.$inferSelect;
+export type InsertWhatsappProxyServer = z.infer<typeof insertWhatsappProxyServerSchema>;
 
 export const languages = pgTable("languages", {
   id: serial("id").primaryKey(),
@@ -2816,6 +2955,7 @@ export const campaignTemplates = pgTable("campaign_templates", {
   id: serial("id").primaryKey(),
   companyId: integer("company_id").notNull().references(() => companies.id),
   createdById: integer("created_by_id").notNull().references(() => users.id),
+  connectionId: integer("connection_id").references(() => channelConnections.id), // WhatsApp connection used for this template
   name: text("name").notNull(),
   description: text("description"),
   category: text("category").default("general"),
@@ -2826,6 +2966,7 @@ export const campaignTemplates = pgTable("campaign_templates", {
   whatsappTemplateLanguage: text("whatsapp_template_language").default('en'),
   content: text("content").notNull(),
   mediaUrls: jsonb("media_urls").default([]),
+  mediaHandle: text("media_handle"), // WhatsApp media handle for template media (uploaded during template creation)
   variables: jsonb("variables").default([]),
   channelType: text("channel_type").notNull().default("whatsapp"),
   whatsappChannelType: text("whatsapp_channel_type", { enum: ['official', 'unofficial'] }).default('unofficial'),
@@ -3061,6 +3202,56 @@ export const whatsappAccountLogs = pgTable("whatsapp_account_logs", {
   createdAt: timestamp("created_at").notNull().defaultNow()
 });
 
+
+export const scheduledMessageStatusEnum = pgEnum('scheduled_message_status', [
+  'pending',
+  'scheduled', 
+  'processing',
+  'sent',
+  'failed',
+  'cancelled'
+]);
+
+
+export const scheduledMessages = pgTable("scheduled_messages", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull(),
+  conversationId: integer("conversation_id").notNull(),
+  channelId: integer("channel_id").notNull(),
+  channelType: text("channel_type").notNull(), // 'whatsapp', 'instagram', 'messenger', 'email', etc.
+  
+
+  content: text("content").notNull(),
+  messageType: text("message_type").notNull().default('text'), // 'text', 'media', 'template', etc.
+  mediaUrl: text("media_url"),
+  mediaFilePath: text("media_file_path"), // Local file path for scheduled media
+  mediaType: text("media_type"), // 'image', 'video', 'audio', 'document'
+  caption: text("caption"),
+  
+
+  scheduledFor: timestamp("scheduled_for").notNull(),
+  timezone: text("timezone").default('UTC'),
+  
+
+  status: scheduledMessageStatusEnum("status").default('pending'),
+  attempts: integer("attempts").default(0),
+  maxAttempts: integer("max_attempts").default(3),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  sentAt: timestamp("sent_at"),
+  failedAt: timestamp("failed_at"),
+  errorMessage: text("error_message"),
+  
+
+  metadata: jsonb("metadata").default('{}'), // Additional data like quick replies, templates, etc.
+  createdBy: integer("created_by").notNull(), // User who scheduled the message
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+
+
+export type ScheduledMessage = typeof scheduledMessages.$inferSelect;
+export type InsertScheduledMessage = typeof scheduledMessages.$inferInsert;
+
 export const campaignQueue = pgTable("campaign_queue", {
   id: serial("id").primaryKey(),
   campaignId: integer("campaign_id").notNull().references(() => campaigns.id),
@@ -3153,6 +3344,27 @@ export type InsertCampaignTemplate = z.infer<typeof insertCampaignTemplateSchema
 
 export type ContactSegment = typeof contactSegments.$inferSelect;
 export type InsertContactSegment = z.infer<typeof insertContactSegmentSchema>;
+
+/**
+ * Shared TypeScript type for segment filter criteria.
+ * 
+ * This type defines the structure of criteria used in contact segments.
+ * All fields are optional, allowing flexible filtering combinations.
+ * 
+ * Fields:
+ * - tags: Array of tag strings that contacts must have (AND logic)
+ * - created_after: ISO date string for filtering contacts created after this date
+ * - created_before: ISO date string for filtering contacts created before this date
+ * - excludedContactIds: Array of contact IDs to exclude from the segment
+ */
+export interface SegmentFilterCriteria {
+  tags?: string[];
+  created_after?: string;
+  created_before?: string;
+  excludedContactIds?: number[];
+  contactIds?: number[];
+  [key: string]: any; // Allow additional fields for extensibility
+}
 
 export type Campaign = typeof campaigns.$inferSelect;
 export type InsertCampaign = z.infer<typeof insertCampaignSchema>;
@@ -3897,6 +4109,49 @@ export const backupAuditLogs = pgTable("backup_audit_logs", {
 });
 
 
+export const databaseBackupStatusEnum = pgEnum('database_backup_status', ['creating', 'completed', 'failed', 'uploading', 'uploaded']);
+export const databaseBackupTypeEnum = pgEnum('database_backup_type', ['manual', 'scheduled']);
+export const databaseBackupFormatEnum = pgEnum('database_backup_format', ['sql', 'custom']);
+
+export const databaseBackups = pgTable("database_backups", {
+  id: text("id").primaryKey(), // UUID
+  filename: text("filename").notNull(),
+  type: databaseBackupTypeEnum("type").notNull().default('manual'),
+  description: text("description").notNull(),
+  size: integer("size").notNull().default(0), // in bytes
+  status: databaseBackupStatusEnum("status").notNull().default('creating'),
+  storageLocations: jsonb("storage_locations").notNull().default('["local"]'), // array of storage locations
+  checksum: text("checksum").notNull(),
+  errorMessage: text("error_message"),
+
+  databaseSize: integer("database_size").default(0),
+  tableCount: integer("table_count").default(0),
+  rowCount: integer("row_count").default(0),
+  compressionRatio: real("compression_ratio"),
+  encryptionEnabled: boolean("encryption_enabled").default(false),
+
+  appVersion: text("app_version"),
+  pgVersion: text("pg_version"),
+  instanceId: text("instance_id"),
+  dumpFormat: databaseBackupFormatEnum("dump_format").default('sql'),
+  schemaChecksum: text("schema_checksum"),
+
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+
+export const databaseBackupLogs = pgTable("database_backup_logs", {
+  id: text("id").primaryKey(), // UUID
+  scheduleId: text("schedule_id").notNull(), // 'manual' (for non-scheduled events), 'restore' (for restore operations), or schedule UUID (for scheduled backups)
+  backupId: text("backup_id").references(() => databaseBackups.id),
+  status: text("status").notNull(), // 'success' | 'failed' | 'partial' | 'in_progress' - faithful to actual state, not coerced
+  timestamp: timestamp("timestamp").notNull().defaultNow(),
+  errorMessage: text("error_message"),
+  metadata: jsonb("metadata").default('{}'), // Contains event_type for non-scheduled events (e.g., 'cleanup', 'cleanup_deleted', 'cleanup_failed')
+  createdAt: timestamp("created_at").notNull().defaultNow()
+});
+
+
 export const insertInboxBackupSchema = createInsertSchema(inboxBackups).pick({
   companyId: true,
   createdByUserId: true,
@@ -3948,6 +4203,38 @@ export const insertBackupAuditLogSchema = createInsertSchema(backupAuditLogs).pi
   userAgent: true
 });
 
+export const insertDatabaseBackupSchema = createInsertSchema(databaseBackups).pick({
+  id: true,
+  filename: true,
+  type: true,
+  description: true,
+  size: true,
+  status: true,
+  storageLocations: true,
+  checksum: true,
+  errorMessage: true,
+  databaseSize: true,
+  tableCount: true,
+  rowCount: true,
+  compressionRatio: true,
+  encryptionEnabled: true,
+  appVersion: true,
+  pgVersion: true,
+  instanceId: true,
+  dumpFormat: true,
+  schemaChecksum: true
+});
+
+export const insertDatabaseBackupLogSchema = createInsertSchema(databaseBackupLogs).pick({
+  id: true,
+  scheduleId: true,
+  backupId: true,
+  status: true,
+  timestamp: true,
+  errorMessage: true,
+  metadata: true
+});
+
 export type KnowledgeBaseDocument = typeof knowledgeBaseDocuments.$inferSelect;
 export type InsertKnowledgeBaseDocument = z.infer<typeof insertKnowledgeBaseDocumentSchema>;
 
@@ -3971,6 +4258,13 @@ export type InsertInboxRestore = z.infer<typeof insertInboxRestoreSchema>;
 
 export type BackupAuditLog = typeof backupAuditLogs.$inferSelect;
 export type InsertBackupAuditLog = z.infer<typeof insertBackupAuditLogSchema>;
+
+export type DatabaseBackup = typeof databaseBackups.$inferSelect;
+export type InsertDatabaseBackup = z.infer<typeof insertDatabaseBackupSchema>;
+
+export type DatabaseBackupLog = typeof databaseBackupLogs.$inferSelect;
+export type InsertDatabaseBackupLog = z.infer<typeof insertDatabaseBackupLogSchema>;
+
 export type InsertKnowledgeBaseConfig = z.infer<typeof insertKnowledgeBaseConfigSchema>;
 
 export type KnowledgeBaseDocumentNode = typeof knowledgeBaseDocumentNodes.$inferSelect;

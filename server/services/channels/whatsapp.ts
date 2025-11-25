@@ -8,7 +8,8 @@ import {
   WAMessage,
   downloadMediaMessage,
   decryptPollVote,
-  jidNormalizedUser
+  jidNormalizedUser,
+  fetchLatestWaWebVersion
 } from 'baileys';
 import { Boom } from '@hapi/boom';
 import path from 'path';
@@ -16,6 +17,8 @@ import fs from 'fs';
 import * as fsPromises from 'fs/promises';
 import fsExtra from 'fs-extra';
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { storage } from '../../storage';
 import {
   InsertMessage,
@@ -36,6 +39,7 @@ import {
   getWhatsAppMimeType,
   cleanupTempAudioFiles
 } from '../../utils/audio-converter';
+import { isWhatsAppGroupChatId } from '../../utils/whatsapp-group-filter';
 
 /**
  * Helper function to determine the correct identifier type based on connection type
@@ -54,6 +58,53 @@ function getIdentifierTypeFromConnection(channelType?: string): string {
   }
 
   return 'whatsapp_unofficial';
+}
+
+/**
+ * Normalize WhatsApp JID to standard format
+ * Converts @lid (linked device) and other non-standard formats to @s.whatsapp.net
+ * @param jid - The JID to normalize (e.g., "1234567890@lid" or "1234567890@s.whatsapp.net")
+ * @returns Normalized JID in format "phoneNumber@s.whatsapp.net" or "groupId@g.us"
+ */
+function normalizeWhatsAppJid(jid: string): string {
+  if (!jid || typeof jid !== 'string') {
+    return jid;
+  }
+
+
+  if (jid.endsWith('@g.us')) {
+    return jid;
+  }
+
+
+  const parts = jid.split('@');
+  if (parts.length < 2) {
+
+    const cleanPhone = jid.replace(/[^\d]/g, '');
+    return cleanPhone ? `${cleanPhone}@s.whatsapp.net` : jid;
+  }
+
+  const phoneNumber = parts[0];
+  const suffix = parts[1].toLowerCase();
+
+
+  if (suffix === 'lid' || suffix === 'whatsapp.net' || !suffix.includes('.')) {
+    return `${phoneNumber}@s.whatsapp.net`;
+  }
+
+
+  return jid;
+}
+
+/**
+ * Extract and normalize phone number from WhatsApp JID
+ * @param jid - The JID to extract phone number from
+ * @returns Clean phone number (digits only)
+ */
+function extractPhoneNumberFromJid(jid: string): string {
+  const normalizedJid = normalizeWhatsAppJid(jid);
+  const phoneNumber = normalizedJid.split('@')[0];
+  return phoneNumber.replace(/[^\d]/g, '');
 }
 
 process.on('unhandledRejection', (reason: any, promise) => {
@@ -79,6 +130,16 @@ interface ConnectionState {
   healthScore: number;
   errorCount: number;
   lastError: string | null;
+  lastLatency: number | null;
+  averageLatency: number | null;
+  latencyHistory: number[];
+  lastHealthCheck: Date | null;
+  qrInterval: NodeJS.Timeout | null;
+  qrTimeout: NodeJS.Timeout | null;
+  qrGenerationTimeout: NodeJS.Timeout | null;
+  lastQr: string | null; // Cache last QR string for deduplication (Comment 1)
+  lastQrAt: Date | null; // Timestamp of last QR emission (Comment 1)
+  nextAttemptIn: number | null; // Store computed backoff delay for observability (Comment 5)
   rateLimitInfo: {
     messagesSent: number;
     lastReset: Date;
@@ -92,12 +153,97 @@ interface ReconnectionConfig {
   maxDelay: number;
   backoffMultiplier: number;
   healthCheckInterval: number;
+  pingTimeout: number;
   rateLimitWindow: number;
   maxMessagesPerWindow: number;
 }
 
 const activeConnections = new Map<number, WASocket>();
 const connectionStates = new Map<number, ConnectionState>();
+
+
+const connectSemaphore = {
+  maxConcurrent: 8,
+  current: 0,
+  waiting: [] as Array<{ resolve: () => void; reject: (err: Error) => void }>,
+  async acquire(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.current < this.maxConcurrent) {
+        this.current++;
+        resolve();
+      } else {
+        this.waiting.push({ resolve, reject });
+      }
+    });
+  },
+  release(): void {
+    this.current--;
+    if (this.waiting.length > 0) {
+      const next = this.waiting.shift()!;
+      this.current++;
+      next.resolve();
+    }
+  }
+};
+
+
+const companyConnectSemaphores = new Map<number, {
+  maxConcurrent: number;
+  current: number;
+  waiting: Array<{ resolve: () => void; reject: (err: Error) => void }>;
+  acquire(): Promise<void>;
+  release(): void;
+}>();
+
+function getCompanySemaphore(companyId: number): typeof companyConnectSemaphores extends Map<number, infer T> ? T : never {
+  if (!companyConnectSemaphores.has(companyId)) {
+    const semaphore = {
+      maxConcurrent: 2, // Max 2 concurrent connects per company
+      current: 0,
+      waiting: [] as Array<{ resolve: () => void; reject: (err: Error) => void }>,
+      async acquire(): Promise<void> {
+        return new Promise((resolve, reject) => {
+          if (this.current < this.maxConcurrent) {
+            this.current++;
+            resolve();
+          } else {
+            this.waiting.push({ resolve, reject });
+          }
+        });
+      },
+      release(): void {
+        this.current--;
+        if (this.waiting.length > 0) {
+          const next = this.waiting.shift()!;
+          this.current++;
+          next.resolve();
+        }
+      }
+    };
+    companyConnectSemaphores.set(companyId, semaphore);
+  }
+  return companyConnectSemaphores.get(companyId)!;
+}
+
+
+const qrGenerationRateLimits = new Map<string, {
+  lastInvocation: number;
+  count: number;
+  windowStart: number;
+}>();
+
+
+interface ReconnectTask {
+  connectionId: number;
+  connection: any;
+  priority: number;
+  addedAt: number;
+}
+
+const reconnectQueue: ReconnectTask[] = [];
+let reconnectPoolSize = 4; // Max concurrent reconnections
+let activeReconnections = 0;
+let reconnectQueueProcessing = false;
 
 
 const pollContextCache = new Map<string, {
@@ -128,11 +274,12 @@ setInterval(() => {
 }, 60 * 60 * 1000); // Run every hour
 
 const RECONNECTION_CONFIG: ReconnectionConfig = {
-  maxAttempts: 10,
+  maxAttempts: 8, // Reduced from 10 (Comment 5)
   baseDelay: 2000,
   maxDelay: 300000,
   backoffMultiplier: 1.5,
-  healthCheckInterval: 30000,
+  healthCheckInterval: 20000, // Will be adaptive (Comment 4)
+  pingTimeout: 7000, // Reduced from 10000 (Comment 4)
   rateLimitWindow: 60000,
   maxMessagesPerWindow: 100
 };
@@ -477,6 +624,16 @@ function initializeConnectionState(connectionId: number): ConnectionState {
     healthScore: 100,
     errorCount: 0,
     lastError: null,
+    lastLatency: null,
+    averageLatency: null,
+    latencyHistory: [],
+    lastHealthCheck: null,
+    qrInterval: null,
+    qrTimeout: null,
+    qrGenerationTimeout: null,
+    lastQr: null,
+    lastQrAt: null,
+    nextAttemptIn: null,
     rateLimitInfo: {
       messagesSent: 0,
       lastReset: new Date(),
@@ -500,11 +657,14 @@ function getConnectionState(connectionId: number): ConnectionState {
 }
 
 /**
- * Calculate exponential backoff delay
+ * Calculate exponential backoff delay with jitter (Comment 5)
  */
 function calculateBackoffDelay(attempt: number): number {
-  const delay = RECONNECTION_CONFIG.baseDelay * Math.pow(RECONNECTION_CONFIG.backoffMultiplier, attempt - 1);
-  return Math.min(delay, RECONNECTION_CONFIG.maxDelay);
+  const baseDelay = RECONNECTION_CONFIG.baseDelay * Math.pow(RECONNECTION_CONFIG.backoffMultiplier, attempt - 1);
+  const cappedDelay = Math.min(baseDelay, RECONNECTION_CONFIG.maxDelay);
+
+  const jitter = (Math.random() * 1.0) + 0.5; // 0.5 to 1.5
+  return Math.floor(cappedDelay * jitter);
 }
 
 /**
@@ -553,7 +713,31 @@ function shouldAttemptReconnection(connectionId: number): boolean {
 }
 
 /**
- * Start health monitoring for a connection
+ * Get adaptive health check interval with jitter (Comment 4)
+ */
+function getAdaptiveHealthCheckInterval(state: ConnectionState): number {
+  const baseInterval = RECONNECTION_CONFIG.healthCheckInterval;
+  let adaptiveInterval: number;
+  
+
+  if (state.averageLatency !== null && state.averageLatency < 1500 && state.errorCount === 0) {
+
+    adaptiveInterval = 60000 + Math.random() * 30000; // 60-90s
+  } else if (state.averageLatency !== null && state.averageLatency < 3000 && state.errorCount < 3) {
+
+    adaptiveInterval = 45000 + Math.random() * 15000; // 45-60s
+  } else {
+
+    adaptiveInterval = 20000 + Math.random() * 10000; // 20-30s
+  }
+  
+
+  const jitter = (Math.random() * 0.4) - 0.2; // -0.2 to +0.2
+  return Math.floor(adaptiveInterval * (1 + jitter));
+}
+
+/**
+ * Start health monitoring for a connection with adaptive intervals (Comment 4)
  */
 function startHealthMonitoring(connectionId: number): void {
   const existingInterval = healthCheckIntervals.get(connectionId);
@@ -561,7 +745,10 @@ function startHealthMonitoring(connectionId: number): void {
     clearInterval(existingInterval);
   }
 
-  const interval = setInterval(async () => {
+  let healthCheckCounter = 0;
+  let consecutiveFailures = 0;
+
+  const performHealthCheck = async () => {
     const sock = activeConnections.get(connectionId);
     const state = getConnectionState(connectionId);
 
@@ -569,33 +756,115 @@ function startHealthMonitoring(connectionId: number): void {
       return;
     }
 
+    healthCheckCounter++;
+
     try {
-      const isHealthy = sock.user?.id && sock.authState?.keys;
 
-      if (isHealthy) {
-        updateHealthScore(connectionId, 'success');
+      const pingStart = Date.now();
+      
+      try {
 
-        emitWhatsAppEvent('connectionHealth', {
-          connectionId,
-          healthScore: state.healthScore,
-          status: 'healthy'
-        });
-      } else {
+        await Promise.race([
+          sock.query({ tag: 'iq', attrs: { type: 'get', xmlns: 'w:p' } }),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Ping timeout')), RECONNECTION_CONFIG.pingTimeout)
+          )
+        ]);
+
+
+        const latency = Date.now() - pingStart;
+        
+
+        state.lastLatency = latency;
+        state.latencyHistory.push(latency);
+        
+
+        if (state.latencyHistory.length > 10) {
+          state.latencyHistory = state.latencyHistory.slice(-10);
+        }
+        
+
+        state.averageLatency = state.latencyHistory.reduce((sum, val) => sum + val, 0) / state.latencyHistory.length;
+        state.lastHealthCheck = new Date();
+        consecutiveFailures = 0; // Reset on success
+
+
+        if (latency > 5000) {
+          updateHealthScore(connectionId, 'timeout');
+        } else if (latency >= 2000) {
+          updateHealthScore(connectionId, 'error');
+        } else {
+          updateHealthScore(connectionId, 'success');
+        }
+
+
+        if (!sock.authState?.keys || !sock.user?.id) {
+          updateHealthScore(connectionId, 'error');
+          console.warn(`Session validation failed for connection ${connectionId}: missing keys or user ID`);
+        }
+
+      } catch (pingError) {
+
+        consecutiveFailures++;
         updateHealthScore(connectionId, 'error');
+        console.error(`Health check ping failed for connection ${connectionId}:`, pingError);
+        state.lastLatency = null;
 
 
-        if (state.healthScore < 30) {
-
+        if (consecutiveFailures >= 2 && state.healthScore < 30) {
           await scheduleReconnection(connectionId, await storage.getChannelConnection(connectionId));
         }
       }
+
+
+      let connectionStatus: 'healthy' | 'degraded' | 'unhealthy';
+      if (state.healthScore >= 70 && (state.lastLatency === null || state.lastLatency < 2000)) {
+        connectionStatus = 'healthy';
+      } else if (state.healthScore < 30 || (state.lastLatency !== null && state.lastLatency >= 5000)) {
+        connectionStatus = 'unhealthy';
+      } else {
+        connectionStatus = 'degraded';
+      }
+
+
+      emitWhatsAppEvent('connectionHealth', {
+        connectionId,
+        healthScore: state.healthScore,
+        status: connectionStatus,
+        latency: state.lastLatency,
+        averageLatency: state.averageLatency,
+        lastHealthCheck: state.lastHealthCheck,
+        errorCount: state.errorCount,
+        reconnectAttempts: state.reconnectAttempts
+      });
+
+
+      if (state.lastLatency !== null) {
+        if (state.lastLatency > 5000) {
+          console.warn(`High latency detected for connection ${connectionId}: ${state.lastLatency}ms`);
+        } else if (state.lastLatency > 2000) {
+
+        }
+      }
+
+
+      if (healthCheckCounter % 10 === 0) {
+
+      }
+
     } catch (error) {
       updateHealthScore(connectionId, 'error');
-
+      console.error(`Error in health monitoring for connection ${connectionId}:`, error);
     }
-  }, RECONNECTION_CONFIG.healthCheckInterval);
+    
 
-  healthCheckIntervals.set(connectionId, interval);
+    const nextInterval = getAdaptiveHealthCheckInterval(state);
+    const timeout = setTimeout(performHealthCheck, nextInterval);
+    healthCheckIntervals.set(connectionId, timeout);
+  };
+
+
+  performHealthCheck();
 }
 
 /**
@@ -636,8 +905,7 @@ async function scheduleReconnection(connectionId: number, connection: any): Prom
   state.status = 'reconnecting';
 
   const delay = calculateBackoffDelay(state.reconnectAttempts);
-
-
+  state.nextAttemptIn = delay; // Store for observability (Comment 5)
 
   await updateConnectionStatus(connectionId, 'reconnecting');
 
@@ -651,6 +919,25 @@ async function scheduleReconnection(connectionId: number, connection: any): Prom
 
   const timeout = setTimeout(async () => {
     try {
+      const sessionValid = await validateSessionIntegrity(connectionId);
+
+      if (!sessionValid && state.reconnectAttempts > 3) {
+        await backupSession(connectionId);
+        const sessionDir = path.join(SESSION_DIR, `session-${connectionId}`);
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        } catch (error) {
+          console.error(`Error deleting corrupted session directory for connection ${connectionId}:`, error);
+        }
+        console.warn(`Session corrupted after 3 attempts, clearing for QR generation for connection ${connectionId}`);
+        await updateConnectionStatus(connectionId, 'qr_code');
+        state.reconnectAttempts = 0;
+
+        await connectToWhatsApp(connectionId, connection.userId);
+        return;
+      }
+
+      await backupSession(connectionId);
 
 
       await cleanupConnection(connectionId);
@@ -659,6 +946,7 @@ async function scheduleReconnection(connectionId: number, connection: any): Prom
 
       state.reconnectAttempts = 0;
       state.lastConnected = new Date();
+      state.nextAttemptIn = null; // Clear on success
       updateHealthScore(connectionId, 'success');
 
 
@@ -712,6 +1000,9 @@ async function updateConnectionStatus(connectionId: number, status: string): Pro
 async function cleanupConnection(connectionId: number): Promise<void> {
   try {
     stopHealthMonitoring(connectionId);
+    
+
+    clearQRIntervals(connectionId);
 
     const timeout = reconnectionTimeouts.get(connectionId);
     if (timeout) {
@@ -782,6 +1073,10 @@ export function getConnectionDiagnostics(connectionId: number): any {
     lastReconnectAttempt: state.lastReconnectAttempt,
     errorCount: state.errorCount,
     lastError: state.lastError,
+    lastLatency: state.lastLatency,
+    averageLatency: state.averageLatency,
+    latencyHistory: state.latencyHistory,
+    lastHealthCheck: state.lastHealthCheck,
     rateLimitInfo: state.rateLimitInfo,
     socketConnected: !!socket,
     hasUser: !!socket?.user?.id,
@@ -852,6 +1147,33 @@ function broadcastWhatsAppEvent(eventType: string, data: any, options: {
   });
 }
 
+/**
+ * Clear QR code intervals and timeouts for a connection
+ * Prevents memory leaks and unnecessary emissions
+ * Also resets QR cache fields (Comment 1)
+ */
+function clearQRIntervals(connectionId: number): void {
+  const state = getConnectionState(connectionId);
+  
+  if (state.qrInterval) {
+    clearInterval(state.qrInterval);
+    state.qrInterval = null;
+  }
+  
+  if (state.qrTimeout) {
+    clearTimeout(state.qrTimeout);
+    state.qrTimeout = null;
+  }
+  
+  if (state.qrGenerationTimeout) {
+    clearTimeout(state.qrGenerationTimeout);
+    state.qrGenerationTimeout = null;
+  }
+
+  state.lastQr = null;
+  state.lastQrAt = null;
+}
+
 
 function broadcastNewConversation(enrichedConversation: any): void {
   try {
@@ -875,6 +1197,242 @@ function broadcastNewConversation(enrichedConversation: any): void {
 
 const baileysPinoLogger = pino({ level: 'warn' });
 
+/**
+ * Create proxy agent for WhatsApp based on per-connection proxy server selection
+ * @param connectionId The connection ID to load proxy config for
+ * @returns Proxy agent instance or undefined if proxy is not selected/enabled
+ */
+async function createProxyAgent(connectionId: number): Promise<any | undefined> {
+  try {
+    const connection = await storage.getChannelConnection(connectionId);
+    if (!connection) {
+      console.warn(`Connection not found for ID ${connectionId}`);
+      return undefined;
+    }
+
+    if (!connection.proxyServerId) {
+      return undefined;
+    }
+
+    const proxyServer: any = await storage.getWhatsappProxyServer(connection.proxyServerId);
+    if (!proxyServer || !proxyServer.enabled) {
+      return undefined;
+    }
+
+    if (!proxyServer.host || !proxyServer.port) {
+      console.warn(`Invalid proxy server configuration for proxy ID ${connection.proxyServerId}`);
+      return undefined;
+    }
+
+    const type = String(proxyServer.type || '').toLowerCase();
+    const portNum = Number(proxyServer.port);
+    if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
+      console.warn(`Invalid proxy port ${portNum} for proxy ID ${connection.proxyServerId}`);
+      return undefined;
+    }
+
+    const user = encodeURIComponent(proxyServer.username || '');
+    const pass = encodeURIComponent(proxyServer.password || '');
+
+    let proxyUrl: string;
+    if (proxyServer.username && proxyServer.password) {
+      proxyUrl = `${type}://${user}:${pass}@${proxyServer.host}:${portNum}`;
+    } else {
+      proxyUrl = `${type}://${proxyServer.host}:${portNum}`;
+    }
+
+    let agent: any;
+    switch (type) {
+      case 'socks5':
+        agent = new SocksProxyAgent(proxyUrl);
+
+        break;
+      case 'http':
+      case 'https':
+        agent = new HttpsProxyAgent(proxyUrl);
+
+        break;
+      default:
+        console.warn(`Unsupported proxy type: ${proxyServer.type}`);
+        return undefined;
+    }
+
+    return agent;
+  } catch (error) {
+    console.error(`Error creating proxy agent for connection ${connectionId}:`, error);
+    return undefined;
+  }
+}
+
+/**
+ * Validate session integrity by checking credentials file structure
+ * @param connectionId The connection ID to validate
+ * @returns true if session is valid, false otherwise
+ */
+async function validateSessionIntegrity(connectionId: number): Promise<boolean> {
+  try {
+    const sessionDir = path.join(SESSION_DIR, `session-${connectionId}`);
+    const credsPath = path.join(sessionDir, 'creds.json');
+
+    try {
+      await fsPromises.access(credsPath);
+    } catch {
+      console.warn(`Session validation failed: creds.json not found for connection ${connectionId}`);
+      return false;
+    }
+
+    const credsData = await fsPromises.readFile(credsPath, 'utf-8');
+    const creds = JSON.parse(credsData);
+
+    if (!creds.me || !creds.signedIdentityKey || !creds.signedPreKey) {
+      console.warn(`Session validation failed: missing required fields in creds.json for connection ${connectionId}`);
+      return false;
+    }
+
+
+    return true;
+  } catch (error) {
+    console.warn(`Session validation failed due to error for connection ${connectionId}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Create a backup of the current session before reconnection attempts
+ * Enforces retention limits (Comment 9)
+ * @param connectionId The connection ID to backup
+ */
+async function backupSession(connectionId: number): Promise<void> {
+  try {
+    const sessionDir = path.join(SESSION_DIR, `session-${connectionId}`);
+
+    if (!fs.existsSync(sessionDir)) {
+      return;
+    }
+
+    const backupDir = path.join(SESSION_DIR, `session-${connectionId}-backup-${Date.now()}`);
+    const backupStartTime = Date.now();
+    await fsExtra.copy(sessionDir, backupDir);
+    const backupDuration = Date.now() - backupStartTime;
+    
+
+
+
+    await cleanupOldBackups(connectionId);
+
+  } catch (error) {
+    console.error(`Session backup failed for connection ${connectionId}:`, error);
+  }
+}
+
+/**
+ * Clean up old session backups, keeping only the last 5 per connection (Comment 9)
+ * Enforces overall size limit (100MB total)
+ * @param connectionId The connection ID to clean backups for
+ */
+async function cleanupOldBackups(connectionId: number): Promise<void> {
+  try {
+    const files = fs.readdirSync(SESSION_DIR);
+    const backupPattern = `session-${connectionId}-backup-`;
+    const maxBackupsPerConnection = 5;
+    const maxTotalSizeBytes = 100 * 1024 * 1024; // 100MB
+
+    const candidates = files.filter(file => file.startsWith(backupPattern));
+    const backups = candidates
+      .filter(file => {
+        const suffix = file.slice(backupPattern.length);
+        const n = Number(suffix);
+        return Number.isFinite(n);
+      })
+      .map(file => ({
+        name: file,
+        timestamp: Number(file.slice(backupPattern.length)),
+        path: path.join(SESSION_DIR, file)
+      }))
+      .sort((a, b) => b.timestamp - a.timestamp); // Newest first
+
+
+    const oldBackups = backups.slice(maxBackupsPerConnection);
+    let deletedCount = 0;
+    
+    for (const backup of oldBackups) {
+      try {
+        const stat = fs.lstatSync(backup.path);
+        if (stat.isDirectory()) {
+          fs.rmSync(backup.path, { recursive: true, force: true });
+          deletedCount++;
+        }
+      } catch (error) {
+        console.error(`Failed to delete old backup ${backup.name}:`, error);
+      }
+    }
+
+
+    let totalSize = 0;
+    const allBackups: Array<{ name: string; path: string; size: number; timestamp: number }> = [];
+    
+    for (const file of files) {
+      if (file.includes('-backup-')) {
+        const filePath = path.join(SESSION_DIR, file);
+        try {
+          const stat = fs.lstatSync(filePath);
+          if (stat.isDirectory()) {
+            const size = await getDirectorySize(filePath);
+            const match = file.match(/backup-(\d+)$/);
+            const timestamp = match ? Number(match[1]) : 0;
+            allBackups.push({ name: file, path: filePath, size, timestamp });
+            totalSize += size;
+          }
+        } catch (e) {
+
+        }
+      }
+    }
+
+
+    if (totalSize > maxTotalSizeBytes) {
+      allBackups.sort((a, b) => a.timestamp - b.timestamp); // Oldest first
+      for (const backup of allBackups) {
+        if (totalSize <= maxTotalSizeBytes) break;
+        try {
+          fs.rmSync(backup.path, { recursive: true, force: true });
+          totalSize -= backup.size;
+          deletedCount++;
+        } catch (error) {
+          console.error(`Failed to delete oversized backup ${backup.name}:`, error);
+        }
+      }
+    }
+
+    if (deletedCount > 0) {
+
+    }
+  } catch (error) {
+    console.error(`Error cleaning up old backups for connection ${connectionId}:`, error);
+  }
+}
+
+/**
+ * Get total size of a directory recursively
+ */
+async function getDirectorySize(dirPath: string): Promise<number> {
+  let totalSize = 0;
+  try {
+    const files = fs.readdirSync(dirPath);
+    for (const file of files) {
+      const filePath = path.join(dirPath, file);
+      const stat = fs.lstatSync(filePath);
+      if (stat.isDirectory()) {
+        totalSize += await getDirectorySize(filePath);
+      } else {
+        totalSize += stat.size;
+      }
+    }
+  } catch (e) {
+
+  }
+  return totalSize;
+}
 
 async function getEnhancedGroupMetadata(sock: WASocket, groupJid: string) {
   try {
@@ -890,16 +1448,6 @@ async function getEnhancedGroupMetadata(sock: WASocket, groupJid: string) {
     for (const participant of metadata.participants) {
       const participantAny = participant as any;
 
-
-      console.log(`🔍 Participant fields:`, {
-        id: participantAny.id,
-        jid: participantAny.jid,
-        lid: participantAny.lid,
-        name: participantAny.name,
-        notify: participantAny.notify,
-        verifiedName: participantAny.verifiedName,
-        allKeys: Object.keys(participantAny)
-      });
 
       let enhancedParticipant = { ...participant };
 
@@ -1439,6 +1987,32 @@ async function processMessageThroughFlowExecutor(
   channelConnection: any
 ): Promise<void> {
   try {
+    if (!contact || !contact.phone) {
+
+      return;
+    }
+
+    const cleanPhone = contact.phone.replace(/[^\d]/g, '');
+
+
+    console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [msg:${message.id || 'unknown'}] Processing through flow executor:`, {
+      contactPhone: contact.phone,
+      cleanPhone: cleanPhone,
+      messageCanonicalId: message.metadata ? (typeof message.metadata === 'string' ? JSON.parse(message.metadata)?.canonicalIdentifier : message.metadata?.canonicalIdentifier) : '',
+      messageRemoteJid: message.metadata ? (typeof message.metadata === 'string' ? JSON.parse(message.metadata)?.remoteJid : message.metadata?.remoteJid) : '',
+      conversationId: conversation?.id
+    });
+
+    if (isWhatsAppGroupChatId(contact.phone)) {
+
+      return;
+    }
+
+    if (conversation && (conversation.isGroup === true || conversation.is_group === true)) {
+
+      return;
+    }
+
     const flowExecutorModule = await import('../flow-executor');
     const flowExecutor = flowExecutorModule.default;
 
@@ -1446,7 +2020,7 @@ async function processMessageThroughFlowExecutor(
       await flowExecutor.processIncomingMessage(message, conversation, contact, channelConnection);
     }
   } catch (error) {
-
+    console.error(`[WhatsApp Routing] [${new Date().toISOString()}] [msg:${message.id || 'unknown'}] Error in processMessageThroughFlowExecutor:`, error);
     throw error;
   }
 }
@@ -1665,7 +2239,7 @@ function resolveMediaPath(mediaUrlOrPath: string): string {
  * @param messageId The message ID for logging
  * @returns Buffer containing media data or null if failed
  */
-async function attemptAlternativeMediaDownload(message: WAMessage, sock: WASocket, messageId: string): Promise<Buffer | null> {
+async function attemptAlternativeMediaDownload(message: WAMessage, sock: WASocket, messageId: string, connectionId: number): Promise<Buffer | null> {
   try {
 
 
@@ -1682,13 +2256,20 @@ async function attemptAlternativeMediaDownload(message: WAMessage, sock: WASocke
 
       try {
 
-        const response = await axios.get(mediaMessage.url, {
+
+        const proxyAgent = await createProxyAgent(connectionId);
+        const axiosOptions: any = {
           responseType: 'arraybuffer',
           timeout: 30000, // 30 second timeout
           headers: {
             'User-Agent': 'WhatsApp/2.2147.10 Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
           }
-        });
+        };
+        if (proxyAgent) {
+          axiosOptions.httpAgent = proxyAgent;
+          axiosOptions.httpsAgent = proxyAgent;
+        }
+        const response = await axios.get(mediaMessage.url, axiosOptions);
 
         if (response.data && response.data.byteLength > 0) {
 
@@ -1748,7 +2329,7 @@ async function attemptAlternativeMediaDownload(message: WAMessage, sock: WASocke
  * @param sock The WhatsApp socket
  * @returns The URL path to the saved media file or null if failed
  */
-export async function downloadAndSaveMedia(message: WAMessage, sock: WASocket): Promise<string | null> {
+export async function downloadAndSaveMedia(message: WAMessage, sock: WASocket, connectionId: number): Promise<string | null> {
   const messageId = message.key?.id || '';
   try {
     if (!message.message) return null;
@@ -1845,11 +2426,11 @@ export async function downloadAndSaveMedia(message: WAMessage, sock: WASocket): 
 
 
 
-        buffer = await attemptAlternativeMediaDownload(message, sock, messageId);
+        buffer = await attemptAlternativeMediaDownload(message, sock, messageId, connectionId);
       } else {
 
 
-        buffer = await attemptAlternativeMediaDownload(message, sock, messageId);
+        buffer = await attemptAlternativeMediaDownload(message, sock, messageId, connectionId);
       }
     }
 
@@ -1913,16 +2494,38 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
       await cleanupConnection(connectionId);
 
       const sessionDir = path.join(SESSION_DIR, `session-${connectionId}`);
-      if (!fs.existsSync(sessionDir)) {
+      if (fs.existsSync(sessionDir)) {
+        const sessionValid = await validateSessionIntegrity(connectionId);
+        if (!sessionValid) {
+          console.warn(`Existing session validation failed for connection ${connectionId}, proceeding with caution`);
+          await backupSession(connectionId);
+        }
+      } else {
         fs.mkdirSync(sessionDir, { recursive: true });
       }
 
       const { state: authState, saveCreds } = await useMultiFileAuthState(sessionDir);
 
-      const connection = await storage.getChannelConnection(connectionId);
-      const shouldSyncHistory = connection?.historySyncEnabled || false;
+      const refreshedConnection = await storage.getChannelConnection(connectionId);
+      const shouldSyncHistory = refreshedConnection?.historySyncEnabled || false;
+
+
+      const proxyAgent = await createProxyAgent(connectionId);
+
+
+      const versionPromise = fetchLatestWaWebVersion();
+      const timeoutPromise = new Promise<{ version: undefined; isLatest: false }>((resolve) => {
+        setTimeout(() => resolve({ version: undefined, isLatest: false }), 3000);
+      });
+      
+      const { version } = await Promise.race([versionPromise, timeoutPromise]).catch((err) => {
+        console.warn('Using cached version for faster QR generation:', err.message);
+        return { version: undefined, isLatest: false };
+      });
 
       const sock = makeWASocket({
+        ...(version && { version }), // 🔥 Use the dynamically fetched version if available
+        ...(proxyAgent && { agent: proxyAgent, fetchAgent: proxyAgent }),
         auth: {
           creds: authState.creds,
           keys: makeCacheableSignalKeyStore(authState.keys, baileysPinoLogger),
@@ -1931,9 +2534,10 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
         browser: Browsers.macOS('Chrome'),
         logger: baileysPinoLogger,
         markOnlineOnConnect: true,
-        syncFullHistory: shouldSyncHistory,
+
+        syncFullHistory: false,
         shouldSyncHistoryMessage: (_msg) => {
-          return shouldSyncHistory;
+          return false; // Disable during QR phase
         },
         getMessage: async (_key) => {
           return undefined;
@@ -1962,7 +2566,9 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
 
         emitOwnEvents: true,
 
-        keepAliveIntervalMs: 30000,
+        keepAliveIntervalMs: 28000, // Reduced from 15000 (Comment 7)
+
+        connectTimeoutMs: 30000,
       });
 
       activeConnections.set(connectionId, sock);
@@ -1971,36 +2577,85 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
       connState.socket = sock;
       connState.status = 'connecting';
 
+
+      const qrTimeout = setTimeout(() => {
+        if (connState.status === 'connecting') {
+          console.warn(`QR generation timeout for connection ${connectionId}`);
+          connState.status = 'error';
+          updateHealthScore(connectionId, 'timeout');
+          
+
+          connectionAttempts.delete(connectionId);
+          
+          emitWhatsAppEvent('connectionStatusUpdate', {
+            connectionId,
+            status: 'error',
+            error: 'QR generation timeout'
+          });
+        }
+      }, 45000); // 45 second timeout for QR generation
+
+
+      connState.qrGenerationTimeout = qrTimeout;
+
       sock.ev.on('connection.update', async (update) => {
         try {
           const { connection, lastDisconnect, qr } = update;
 
           if (qr) {
 
-            connState.status = 'qr_code';
-            await updateConnectionStatus(connectionId, 'qr_code');
+            const now = new Date();
+            const shouldEmit = !connState.lastQr || 
+                             connState.lastQr !== qr || 
+                             !connState.lastQrAt || 
+                             (now.getTime() - connState.lastQrAt.getTime()) > 12000; // Only re-emit if >12s since last
+            
+            if (shouldEmit) {
 
-            setTimeout(() => {
+              clearQRIntervals(connectionId);
+              if (connState.qrGenerationTimeout) {
+                clearTimeout(connState.qrGenerationTimeout);
+                connState.qrGenerationTimeout = null;
+              }
+              
+              connState.status = 'qr_code';
+              await updateConnectionStatus(connectionId, 'qr_code');
+
+
+              connState.lastQr = qr;
+              connState.lastQrAt = now;
+
 
               emitWhatsAppEvent('qrCode', {
                 connectionId,
                 qrCode: qr,
               });
 
-              const qrInterval = setInterval(() => {
-                if (activeConnections.has(connectionId)) {
 
-                  emitWhatsAppEvent('qrCode', {
-                    connectionId,
-                    qrCode: qr,
-                  });
+              connState.qrInterval = setInterval(() => {
+                if (activeConnections.has(connectionId) && connState.status === 'qr_code') {
+
+                  const timeSinceLastEmit = connState.lastQrAt ? 
+                    Date.now() - connState.lastQrAt.getTime() : Infinity;
+                  
+                  if (timeSinceLastEmit > 15000) {
+                    connState.lastQrAt = new Date();
+                    emitWhatsAppEvent('qrCode', {
+                      connectionId,
+                      qrCode: qr,
+                    });
+                  }
                 } else {
-                  clearInterval(qrInterval);
-                }
-              }, 10000);
 
-              setTimeout(() => clearInterval(qrInterval), 30000);
-            }, 1000);
+                  clearQRIntervals(connectionId);
+                }
+              }, 12000); // Check every 12s instead of fixed 10s
+
+
+              connState.qrTimeout = setTimeout(() => {
+                clearQRIntervals(connectionId);
+              }, 30000);
+            }
           }
 
           if (connection === 'close') {
@@ -2008,9 +2663,16 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
 
+          clearQRIntervals(connectionId);
+          if (connState.qrGenerationTimeout) {
+            clearTimeout(connState.qrGenerationTimeout);
+            connState.qrGenerationTimeout = null;
+          }
+          
+
+          connectionAttempts.delete(connectionId);
 
           if (shouldReconnect) {
-
             connState.status = 'reconnecting';
             updateHealthScore(connectionId, 'error');
 
@@ -2027,13 +2689,24 @@ export async function connectToWhatsApp(connectionId: number, userId: number): P
               const sessionDir = path.join(SESSION_DIR, `session-${connectionId}`);
               if (fs.existsSync(sessionDir)) {
                 fs.rmSync(sessionDir, { recursive: true, force: true });
-
               }
             } catch (error) {
               console.error('Error removing session directory:', error);
             }
           }
         } else if (connection === 'open') {
+
+          clearQRIntervals(connectionId);
+          
+
+          if (connState.qrGenerationTimeout) {
+            clearTimeout(connState.qrGenerationTimeout);
+            connState.qrGenerationTimeout = null;
+          }
+          
+
+          connectionAttempts.delete(connectionId);
+          
           connState.status = 'connected';
           connState.lastConnected = new Date();
           connState.reconnectAttempts = 0;
@@ -2337,6 +3010,9 @@ async function handleIncomingMessage(
   isHistorySync: boolean = false,
   historySyncBatchId?: string
 ): Promise<void> {
+  const messageId = waMsg.key?.id || 'unknown';
+  const rawRemoteJid = waMsg.key?.remoteJid || '';
+  
   try {
     if (!waMsg.key || !waMsg.key.remoteJid || !waMsg.key.id) {
 
@@ -2354,10 +3030,31 @@ async function handleIncomingMessage(
       return;
     }
 
-    const remoteJid = waMsg.key.remoteJid;
+
+    const rawRemoteJidBeforeNormalization = waMsg.key.remoteJid;
+    const remoteJid = normalizeWhatsAppJid(waMsg.key.remoteJid);
     const companyId = user.companyId;
 
     const isFromMe = waMsg.key.fromMe === true;
+
+
+
+    const remoteJidAlt = (waMsg.key as any).remoteJidAlt || null;
+    const participantAlt = (waMsg.key as any).participantAlt || null;
+    
+    console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Initial message receipt:`, {
+      rawRemoteJid: rawRemoteJidBeforeNormalization,
+      normalizedRemoteJid: remoteJid,
+      remoteJidAlt: remoteJidAlt, // Baileys v6.8.0+ alternate JID (phone number format)
+      participantAlt: participantAlt, // Baileys v6.8.0+ alternate participant JID
+      fromMe: isFromMe,
+      id: messageId,
+      participant: waMsg.key.participant || null,
+      userId: userId,
+      connectionId: connectionId,
+      pushName: waMsg.pushName || null,
+      messageType: waMsg.message ? Object.keys(waMsg.message)[0] : 'unknown'
+    });
 
 
 
@@ -2405,33 +3102,188 @@ async function handleIncomingMessage(
 
     }
 
-    const isGroupChat = waMsg.key.remoteJid.endsWith('@g.us');
 
+    const isGroupChat = remoteJid.endsWith('@g.us');
+    
+    if (isGroupChat) {
+
+      return;
+    }
 
     let messageType = 'text';
     let messageContent = '';
     let mediaUrl: string | null = null;
 
-    let phoneNumber: string;
-    let groupJid: string | null = null;
-    let participantJid: string | null = null;
-    let participantName: string | null = null;
 
-    if (isGroupChat) {
-      groupJid = waMsg.key.remoteJid;
 
-      if (isFromMe) {
-        phoneNumber = groupJid.split('@')[0];
-      } else {
-        participantJid = waMsg.key.participant || waMsg.key.remoteJid;
-        phoneNumber = participantJid.split('@')[0];
+    let actualPhoneNumber: string | null = null;
+    let resolvedRemoteJid = remoteJid;
+    
+    if (rawRemoteJidBeforeNormalization.endsWith('@lid')) {
 
-        if (waMsg.pushName) {
-          participantName = waMsg.pushName;
+      
+
+      if (remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')) {
+        resolvedRemoteJid = remoteJidAlt;
+        actualPhoneNumber = remoteJidAlt.split('@')[0];
+        console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Resolved @lid via remoteJidAlt (Baileys official):`, {
+          originalLidJid: rawRemoteJidBeforeNormalization,
+          resolvedJid: resolvedRemoteJid,
+          actualPhoneNumber: actualPhoneNumber
+        });
+      }
+      
+
+      if (!actualPhoneNumber) {
+        try {
+          const sock = activeConnections.get(connectionId);
+          if (sock) {
+
+
+            if ((sock as any).store && (sock as any).store.contacts) {
+              const contactInfo = (sock as any).store.contacts[rawRemoteJidBeforeNormalization];
+              if (contactInfo) {
+
+                
+
+                if (contactInfo.phoneNumber) {
+                  const phoneJid = `${contactInfo.phoneNumber}@s.whatsapp.net`;
+                  resolvedRemoteJid = phoneJid;
+                  actualPhoneNumber = contactInfo.phoneNumber.replace(/[^\d]/g, '');
+                  console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Resolved @lid via contact store phoneNumber:`, {
+                    originalLidJid: rawRemoteJidBeforeNormalization,
+                    resolvedJid: resolvedRemoteJid,
+                    actualPhoneNumber: actualPhoneNumber
+                  });
+                } else if (contactInfo.jid && contactInfo.jid.includes('@s.whatsapp.net')) {
+                  resolvedRemoteJid = contactInfo.jid;
+                  actualPhoneNumber = contactInfo.jid.split('@')[0];
+                  console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Resolved @lid via contact store jid:`, {
+                    originalLidJid: rawRemoteJidBeforeNormalization,
+                    resolvedJid: resolvedRemoteJid,
+                    actualPhoneNumber: actualPhoneNumber
+                  });
+                }
+              }
+            }
+            
+
+            if (!actualPhoneNumber) {
+              try {
+                const normalizedJid = jidNormalizedUser(rawRemoteJidBeforeNormalization);
+                if (normalizedJid && normalizedJid.includes('@s.whatsapp.net') && normalizedJid !== rawRemoteJidBeforeNormalization) {
+                  resolvedRemoteJid = normalizedJid;
+                  actualPhoneNumber = normalizedJid.split('@')[0];
+                  console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Resolved @lid via jidNormalizedUser:`, {
+                    originalLidJid: rawRemoteJidBeforeNormalization,
+                    resolvedJid: resolvedRemoteJid,
+                    actualPhoneNumber: actualPhoneNumber
+                  });
+                }
+              } catch (normalizeError) {
+                console.warn(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] jidNormalizedUser failed:`, normalizeError);
+              }
+            }
+          } else {
+            console.warn(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] No active socket connection to resolve @lid JID`);
+          }
+        } catch (error) {
+          console.error(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Error in socket-based resolution:`, error);
         }
       }
-    } else {
-      phoneNumber = waMsg.key.remoteJid.split('@')[0];
+      
+
+
+      if (!actualPhoneNumber) {
+        try {
+          const lidIdentifier = rawRemoteJidBeforeNormalization.split('@')[0];
+          
+
+          let existingContact = await storage.getContactByIdentifier(lidIdentifier, 'whatsapp');
+          
+
+          if (!existingContact) {
+
+            const conversations = await storage.getConversationsByChannel(connectionId);
+            for (const conv of conversations) {
+              if (conv.contactId) {
+                const contact = await storage.getContact(conv.contactId);
+                if (contact && contact.phone && 
+                    !contact.phone.startsWith('LID-') && 
+                    contact.phone.replace(/[^\d]/g, '').length >= 10) {
+
+                  const recentMessages = await storage.getMessagesByConversationPaginated(conv.id, 10, 0);
+                  for (const msg of recentMessages) {
+                    if (msg.metadata) {
+                      const metadata = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata;
+                      if (metadata.originalRemoteJid === rawRemoteJidBeforeNormalization ||
+                          metadata.remoteJid === rawRemoteJidBeforeNormalization) {
+                        existingContact = contact;
+                        break;
+                      }
+                    }
+                  }
+                  if (existingContact) break;
+                }
+              }
+            }
+          }
+          
+
+          if (existingContact && existingContact.phone && 
+              !existingContact.phone.startsWith('LID-') && 
+              existingContact.phone.replace(/[^\d]/g, '').length >= 10) {
+            actualPhoneNumber = existingContact.phone.replace(/[^\d]/g, '');
+            resolvedRemoteJid = `${actualPhoneNumber}@s.whatsapp.net`;
+            console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Resolved @lid via existing contact:`, {
+              originalLidJid: rawRemoteJidBeforeNormalization,
+              resolvedJid: resolvedRemoteJid,
+              actualPhoneNumber: actualPhoneNumber,
+              contactId: existingContact.id
+            });
+          }
+        } catch (dbError) {
+          console.warn(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Database lookup failed:`, dbError);
+        }
+      }
+      
+
+      if (!actualPhoneNumber) {
+        console.warn(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Could not resolve @lid to actual phone number. Will use @lid JID for replies (WhatsApp will route correctly).`);
+
+        resolvedRemoteJid = rawRemoteJidBeforeNormalization;
+      }
+    }
+
+
+    const phoneNumber = actualPhoneNumber || extractPhoneNumberFromJid(resolvedRemoteJid);
+    const cleanPhoneNumber = phoneNumber.replace(/[^\d]/g, '');
+    
+
+    console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Sender identification:`, {
+      isGroupChat: false,
+      groupJid: null,
+      participantJid: null,
+      participantName: null,
+      extractedPhoneNumber: cleanPhoneNumber,
+      resolvedRemoteJid: resolvedRemoteJid,
+      normalizedRemoteJid: remoteJid,
+      rawRemoteJid: rawRemoteJidBeforeNormalization,
+      wasLidResolved: actualPhoneNumber !== null
+    });
+
+
+    console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Phone number normalization:`, {
+      rawPhoneNumber: phoneNumber,
+      cleanPhoneNumber: cleanPhoneNumber,
+      canonicalIdentifier: cleanPhoneNumber,
+      remoteJid: remoteJid,
+      originalRemoteJid: rawRemoteJidBeforeNormalization
+    });
+
+    if (isWhatsAppGroupChatId(cleanPhoneNumber)) {
+
+      return;
     }
 
 
@@ -2463,7 +3315,7 @@ async function handleIncomingMessage(
         if (!isHistorySync) {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-            mediaUrl = await downloadAndSaveMedia(waMsg, sock);
+            mediaUrl = await downloadAndSaveMedia(waMsg, sock, connectionId);
             if (mediaUrl) {
 
             } else {
@@ -2480,7 +3332,7 @@ async function handleIncomingMessage(
         if (!isHistorySync) {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-            mediaUrl = await downloadAndSaveMedia(waMsg, sock);
+            mediaUrl = await downloadAndSaveMedia(waMsg, sock, connectionId);
             if (mediaUrl) {
 
             } else {
@@ -2497,7 +3349,7 @@ async function handleIncomingMessage(
         if (!isHistorySync) {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-            mediaUrl = await downloadAndSaveMedia(waMsg, sock);
+            mediaUrl = await downloadAndSaveMedia(waMsg, sock, connectionId);
             if (mediaUrl) {
 
             } else {
@@ -2514,7 +3366,7 @@ async function handleIncomingMessage(
         if (!isHistorySync) {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-            mediaUrl = await downloadAndSaveMedia(waMsg, sock);
+            mediaUrl = await downloadAndSaveMedia(waMsg, sock, connectionId);
             if (mediaUrl) {
 
             } else {
@@ -2539,7 +3391,7 @@ async function handleIncomingMessage(
         if (!isHistorySync) {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-            mediaUrl = await downloadAndSaveMedia(waMsg, sock);
+            mediaUrl = await downloadAndSaveMedia(waMsg, sock, connectionId);
             if (mediaUrl) {
 
             } else {
@@ -2893,142 +3745,34 @@ async function handleIncomingMessage(
     let contact = null;
     let conversation = null;
 
-    if (isGroupChat) {
-      conversation = await storage.getConversationByGroupJid(groupJid!);
-
-      if (!conversation) {
-        const connection = await storage.getChannelConnection(connectionId);
-        const channelType = connection?.channelType || 'whatsapp_unofficial';
-
-        let groupName = groupJid!.split('@')[0];
-        let groupMetadata = null;
-
-        try {
-          const sock = activeConnections.get(connectionId);
-          if (sock) {
-            const metadata = await sock.groupMetadata(groupJid!);
-            groupName = metadata.subject || groupName;
-            groupMetadata = {
-              subject: metadata.subject,
-              desc: metadata.desc,
-              participants: metadata.participants,
-              creation: metadata.creation,
-              owner: metadata.owner
-            };
-          }
-        } catch (error) {
-
-        }
-
-        const conversationData: InsertConversation = {
-          companyId: companyId,
-          contactId: null,
-          channelId: connectionId,
-          channelType: channelType,
-          status: 'active',
-          lastMessageAt: new Date(),
-          isGroup: true,
-          groupJid: groupJid!,
-          groupName: groupName,
-          groupDescription: groupMetadata?.desc || null,
-          groupParticipantCount: groupMetadata?.participants?.length || 0,
-          groupCreatedAt: groupMetadata?.creation ? new Date(groupMetadata.creation * 1000) : new Date(),
-          groupMetadata: groupMetadata,
-          ...(isHistorySync && {
-            isHistorySync: true,
-            historySyncBatchId: historySyncBatchId
-          })
-        };
-
-        conversation = await storage.createConversation(conversationData);
 
 
-
-        broadcastNewConversation({
-          ...conversation,
-          contact: null
-        });
-      }
-
-      if (!isFromMe && participantJid) {
-        contact = await storage.getContactByIdentifier(phoneNumber, 'whatsapp');
-
-        if (!contact) {
-          const contactData: InsertContact = {
-            companyId: companyId,
-            name: participantName || phoneNumber,
-            phone: phoneNumber,
-            email: null,
-            avatarUrl: null,
-            identifier: phoneNumber,
-            identifierType: 'whatsapp',
-            source: 'whatsapp',
-            notes: null,
-            ...(isHistorySync && {
-              isHistorySync: true,
-              historySyncBatchId: historySyncBatchId
-            })
-          };
-
-          contact = await storage.getOrCreateContact(contactData);
-
-        } else if (participantName && contact.name === contact.phone) {
-
-          try {
-            contact = await storage.updateContact(contact.id, {
-              name: participantName
-            });
-
-          } catch (updateError) {
-            console.error('Error updating group participant contact name:', updateError);
-
-          }
-        }
-
-        await storage.upsertGroupParticipant({
-          conversationId: conversation.id,
-          contactId: contact.id,
-          participantJid: participantJid,
-          participantName: participantName || contact.name,
-          isActive: true
-        });
-      }
-    } else {
-      contact = await storage.getContactByIdentifier(phoneNumber, 'whatsapp');
+    contact = await storage.getContactByIdentifier(cleanPhoneNumber, 'whatsapp');
 
       if (!contact) {
-
-        let name = contactDisplayName || phoneNumber;
+        let name = contactDisplayName || cleanPhoneNumber;
         let profilePictureUrl = null;
 
         try {
           const sock = activeConnections.get(connectionId);
           if (sock) {
-
-
-            profilePictureUrl = await fetchProfilePicture(connectionId, phoneNumber);
-
-            if (profilePictureUrl) {
-
-            } else {
-
-            }
+            profilePictureUrl = await fetchProfilePicture(connectionId, cleanPhoneNumber);
           }
         } catch (e) {
 
         }
 
-
         const connection = await storage.getChannelConnection(connectionId);
         const identifierType = getIdentifierTypeFromConnection(connection?.channelType);
+
 
         const contactData: InsertContact = {
           companyId: companyId,
           name,
-          phone: phoneNumber,
+          phone: `+${cleanPhoneNumber}`, // Store with + prefix for consistency - this is the ACTUAL sender's phone
           email: null,
           avatarUrl: profilePictureUrl,
-          identifier: phoneNumber,
+          identifier: cleanPhoneNumber, // Store clean phone number as identifier - this is the ACTUAL sender's phone
           identifierType: identifierType,
           source: 'whatsapp',
           notes: null,
@@ -3039,6 +3783,16 @@ async function handleIncomingMessage(
         };
 
         contact = await storage.getOrCreateContact(contactData);
+        
+        console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Contact created:`, {
+          contactId: contact.id,
+          phone: contact.phone,
+          name: contact.name,
+          identifier: contact.identifier,
+          resolvedRemoteJid: resolvedRemoteJid,
+          normalizedRemoteJid: remoteJid,
+          wasLidResolved: actualPhoneNumber !== null
+        });
 
       } else if (contactDisplayName && contact.name === contact.phone) {
 
@@ -3077,7 +3831,7 @@ async function handleIncomingMessage(
         };
 
         conversation = await storage.createConversation(conversationData);
-
+        
 
 
         broadcastNewConversation({
@@ -3088,8 +3842,14 @@ async function handleIncomingMessage(
         conversation = await storage.updateConversation(conversation.id, {
           lastMessageAt: new Date()
         });
+        
+        console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${messageId}] Conversation found:`, {
+          conversationId: conversation.id,
+          contactId: contact.id,
+          channelId: connectionId,
+          isGroup: false
+        });
       }
-    }
 
     if (conversation) {
       conversation = await storage.updateConversation(conversation.id, {
@@ -3152,15 +3912,18 @@ async function handleIncomingMessage(
       mediaUrl,
       externalId: waMsg.key.id,
 
-      groupParticipantJid: isGroupChat && !isFromMe ? participantJid : null,
-      groupParticipantName: isGroupChat && !isFromMe ? participantName : null,
+      groupParticipantJid: null, // Group chat handling disabled
+      groupParticipantName: null, // Group chat handling disabled
 
       metadata: JSON.stringify({
         messageId: waMsg.key.id,
-        remoteJid: waMsg.key.remoteJid,
+        remoteJid: resolvedRemoteJid, // Use resolved JID (actual phone number)
+        normalizedRemoteJid: remoteJid,
+        originalRemoteJid: rawRemoteJidBeforeNormalization,
         fromMe: isFromMe,
-        isGroupChat,
-        ...(isGroupChat && { groupJid, participantJid, participantName }),
+        isGroupChat: false,
+        canonicalIdentifier: cleanPhoneNumber,
+        wasLidResolved: actualPhoneNumber !== null,
         ...(mediaUrl && { mediaUrl }),
         ...(quotedStanzaId ? { isQuotedMessage: true, quotedMessageId: quotedStanzaId } : {}),
 
@@ -3240,13 +4003,33 @@ async function handleIncomingMessage(
     }
 
 
+
     if (!isGroupChat && !isFromMe) {
       try {
         const channelConnection = await storage.getChannelConnection(connectionId);
 
         if (channelConnection && contact) {
+
+          console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${message.id}] Before scheduling processing:`, {
+            remoteJid: resolvedRemoteJid, // Use resolved JID (actual phone number)
+            canonicalIdentifier: cleanPhoneNumber,
+            debounceKey: `${connectionId}_${cleanPhoneNumber}`,
+            messageId: message.id,
+            conversationId: conversation.id,
+            contactId: contact.id,
+            debouncingEnabled: MESSAGE_DEBOUNCING_CONFIG.enabled,
+            wasLidResolved: actualPhoneNumber !== null
+          });
+          
           if (MESSAGE_DEBOUNCING_CONFIG.enabled) {
-            scheduleDebounceProcessing(message, conversation, contact, channelConnection, remoteJid, connectionId);
+            console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] [msg:${message.id}] Scheduling debounced processing:`, {
+              remoteJid: resolvedRemoteJid, // Use resolved JID (actual phone number)
+              canonicalIdentifier: cleanPhoneNumber,
+              debounceKey: `${connectionId}_${cleanPhoneNumber}`,
+              conversationId: conversation.id,
+              contactId: contact.id
+            });
+            scheduleDebounceProcessing(message, conversation, contact, channelConnection, resolvedRemoteJid, connectionId);
           } else {
             await processMessageThroughFlowExecutor(message, conversation, contact, channelConnection);
           }
@@ -3846,15 +4629,36 @@ export async function sendWhatsAppMessage(
       throw new Error(`WhatsApp connection is not ready (status: ${connState.status})`);
     }
 
-    const isGroupChat = to.endsWith('@g.us');
-    let phoneNumber = to;
 
-    if (!phoneNumber.includes('@')) {
-      phoneNumber = phoneNumber.replace(/\D/g, '');
-      phoneNumber = `${phoneNumber}@s.whatsapp.net`;
+    const isGroupChat = to.endsWith('@g.us');
+    if (isGroupChat) {
+
+      throw new Error('Group chat messaging is disabled for unofficial WhatsApp integration');
     }
 
 
+    let phoneNumber = to;
+    if (!phoneNumber.includes('@')) {
+      phoneNumber = phoneNumber.replace(/\D/g, '');
+      phoneNumber = `${phoneNumber}@s.whatsapp.net`;
+    } else {
+
+
+      if (phoneNumber.endsWith('@lid')) {
+
+
+      } else {
+        phoneNumber = normalizeWhatsAppJid(phoneNumber);
+      }
+    }
+
+
+    console.log(`[WhatsApp Routing] [${new Date().toISOString()}] [conn:${connectionId}] Final reply target assignment:`, {
+      originalTo: to,
+      normalizedPhoneNumber: phoneNumber,
+      extractedPhoneNumber: phoneNumber.split('@')[0],
+      isGroupChat: false
+    });
 
     let sentMessageInfo;
     try {
@@ -4046,9 +4850,9 @@ export async function sendWhatsAppMessage(
       metadata: JSON.stringify({
         messageId: whatsappMessageId,
         remoteJid: sentMessageInfo?.key?.remoteJid,
+        normalizedRemoteJid: phoneNumber,
         fromMe: true,
-        isGroupChat,
-        ...(isGroupChat && { groupJid: phoneNumber }),
+        isGroupChat: false,
         whatsappMessage: sentMessageInfo ? {
           key: sentMessageInfo.key,
           message: { conversation: message },
@@ -5339,12 +6143,11 @@ export async function checkAndRecoverConnections(): Promise<void> {
 
 /**
  * Auto-reconnect all eligible WhatsApp connections on server start
+ * Uses work queue with pool size instead of fixed stagger (Comment 6)
  * This function should be called once during server initialization
  */
 export async function autoReconnectWhatsAppSessions(): Promise<void> {
   try {
-
-
     const allConnections = await storage.getChannelConnections(null);
 
     const whatsappConnections = allConnections.filter(conn =>
@@ -5353,11 +6156,11 @@ export async function autoReconnectWhatsAppSessions(): Promise<void> {
     );
 
     if (whatsappConnections.length === 0) {
-
       return;
     }
 
 
+    const lastAttempted = new Map<number, number>();
 
     const eligibleConnections = whatsappConnections.filter(conn => {
       const sessionDir = path.join(SESSION_DIR, `session-${conn.id}`);
@@ -5371,29 +6174,77 @@ export async function autoReconnectWhatsAppSessions(): Promise<void> {
         conn.status !== 'replaced';
 
 
+      const lastAttempt = lastAttempted.get(conn.id);
+      if (lastAttempt && Date.now() - lastAttempt < 300000) {
+        return false;
+      }
 
       return hasValidStatus || hasCredsFile;
     });
 
 
-
-    for (let i = 0; i < eligibleConnections.length; i++) {
-      const connection = eligibleConnections[i];
-
-      setTimeout(async () => {
-        try {
-
-          await connectToWhatsApp(connection.id, connection.userId);
-
-        } catch (error) {
-          console.error(`Failed to auto-reconnect WhatsApp connection ${connection.id}:`, error);
-          await storage.updateChannelConnectionStatus(connection.id, 'error');
-        }
-      }, i * 5000);
+    for (const connection of eligibleConnections) {
+      reconnectQueue.push({
+        connectionId: connection.id,
+        connection: connection,
+        priority: connection.status === 'active' ? 1 : 2, // Active connections have higher priority
+        addedAt: Date.now()
+      });
     }
+
+
+    if (!reconnectQueueProcessing && reconnectQueue.length > 0) {
+      reconnectQueueProcessing = true;
+      processReconnectQueue();
+    }
+
+
   } catch (error) {
     console.error('Error during WhatsApp auto-reconnection:', error);
   }
+}
+
+/**
+ * Process reconnect queue with pool size limit (Comment 6)
+ */
+async function processReconnectQueue(): Promise<void> {
+  while (reconnectQueue.length > 0 || activeReconnections > 0) {
+
+    while (activeReconnections < reconnectPoolSize && reconnectQueue.length > 0) {
+
+      reconnectQueue.sort((a, b) => a.priority - b.priority);
+      
+      const task = reconnectQueue.shift();
+      if (!task) break;
+
+      activeReconnections++;
+      const taskStartTime = Date.now();
+      
+
+      const jitter = (Math.random() * 4000) - 2000; // -2s to +2s
+      
+      setTimeout(async () => {
+        try {
+          await connectToWhatsApp(task.connectionId, task.connection.userId);
+          const duration = Date.now() - taskStartTime;
+
+        } catch (error) {
+          console.error(`Failed to auto-reconnect WhatsApp connection ${task.connectionId}:`, error);
+          await storage.updateChannelConnectionStatus(task.connectionId, 'error');
+        } finally {
+          activeReconnections--;
+
+          setImmediate(() => processReconnectQueue());
+        }
+      }, Math.max(0, jitter));
+    }
+
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  reconnectQueueProcessing = false;
+
 }
 
 /**

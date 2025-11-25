@@ -77,23 +77,27 @@ interface AIFlowAssistantProps {
   onApplyFlow?: (suggestion: FlowSuggestion) => void;
   onAddNode?: (type: string, data?: any, position?: { x: number; y: number }) => void;
   className?: string;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 export function AIFlowAssistant({
   flowId,
   onApplyFlow,
   onAddNode,
-  className = ''
+  className = '',
+  isOpen: externalIsOpen = false,
+  onClose
 }: AIFlowAssistantProps) {
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
+  const isOpen = externalIsOpen || internalIsOpen;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [selectedSuggestion, setSelectedSuggestion] = useState<FlowSuggestion | null>(null);
-  const [credentialSource, setCredentialSource] = useState<'auto' | 'company' | 'system' | 'manual'>('auto');
-  const [manualApiKey, setManualApiKey] = useState('');
+  const [credentialSource, setCredentialSource] = useState<'auto' | 'company' | 'system'>('auto');
   const [showSettings, setShowSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -298,13 +302,24 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
             content: msg.content,
             timestamp: msg.timestamp.toISOString()
           })), // Send last 10 messages for context
-          credentialSource,
-          apiKey: credentialSource === 'manual' ? manualApiKey : undefined
+          credentialSource
         }),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({}));
+        const errorMessage = errorData.error || errorData.message || `HTTP ${response.status}: ${response.statusText}`;
+        
+
+        if (errorMessage.includes('API key') || errorMessage.includes('credential')) {
+          toast({
+            title: 'API Key Error',
+            description: errorMessage,
+            variant: 'destructive'
+          });
+        }
+        
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -521,7 +536,13 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setIsOpen(false)}
+                onClick={() => {
+                  if (onClose) {
+                    onClose();
+                  } else {
+                    setInternalIsOpen(false);
+                  }
+                }}
                 className={`p-0 hover:bg-muted/50 ${isMobile ? 'h-9 w-9' : 'h-8 w-8'}`}
                 title="Close"
               >
@@ -547,7 +568,7 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
                         <Key className={`${isMobile ? 'w-4 h-4' : 'w-3 h-3'}`} />
                         Credential Source
                       </Label>
-                      <Select value={credentialSource} onValueChange={(value: 'auto' | 'company' | 'system' | 'manual') => setCredentialSource(value)}>
+                      <Select value={credentialSource} onValueChange={(value: 'auto' | 'company' | 'system') => setCredentialSource(value)}>
                         <SelectTrigger className={`mt-2 ${isMobile ? 'text-sm h-10' : 'text-xs h-7'}`}>
                           <SelectValue />
                         </SelectTrigger>
@@ -556,7 +577,7 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
                             <div className="flex items-center gap-2">
                               <Shield className={`${isMobile ? 'w-4 h-4' : 'w-3 h-3'}`} />
                               <span className={isMobile ? 'text-sm' : 'text-xs'}>
-                                Auto (Company → System → Manual)
+                                Auto (Company → System)
                               </span>
                             </div>
                           </SelectItem>
@@ -576,38 +597,15 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
                               </span>
                             </div>
                           </SelectItem>
-                          <SelectItem value="manual">
-                            <div className="flex items-center gap-2">
-                              <Key className={`${isMobile ? 'w-4 h-4' : 'w-3 h-3'}`} />
-                              <span className={isMobile ? 'text-sm' : 'text-xs'}>
-                                Manual API Key
-                              </span>
-                            </div>
-                          </SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-
-                    {credentialSource === 'manual' && (
-                      <div>
-                        <Label className={`font-medium text-muted-foreground ${isMobile ? 'text-sm' : 'text-xs'}`}>
-                          OpenAI API Key
-                        </Label>
-                        <Input
-                          type="password"
-                          value={manualApiKey}
-                          onChange={(e) => setManualApiKey(e.target.value)}
-                          placeholder="sk-..."
-                          className={`mt-2 ${isMobile ? 'text-sm h-10' : 'text-xs h-7'}`}
-                        />
-                      </div>
-                    )}
 
                     <div className={`text-muted-foreground ${isMobile ? 'text-xs' : 'text-[10px]'}`}>
                       {credentialSource === 'auto' && (
                         <span className="flex items-center gap-2">
                           <Shield className={`text-blue-500 ${isMobile ? 'w-3.5 h-3.5' : 'w-2.5 h-2.5'}`} />
-                          Will use the best available credential source
+                          Will use company credentials first, then fallback to system credentials
                         </span>
                       )}
                       {credentialSource === 'company' && (
@@ -620,12 +618,6 @@ Choose a WhatsApp bot template to get started instantly, or describe your own cu
                         <span className="flex items-center gap-2">
                           <Shield className={`text-blue-500 ${isMobile ? 'w-3.5 h-3.5' : 'w-2.5 h-2.5'}`} />
                           Using system-level OpenAI credentials
-                        </span>
-                      )}
-                      {credentialSource === 'manual' && (
-                        <span className="flex items-center gap-2">
-                          <Key className={`text-orange-500 ${isMobile ? 'w-3.5 h-3.5' : 'w-2.5 h-2.5'}`} />
-                          Using manually provided API key
                         </span>
                       )}
                     </div>

@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { getPlanBillingPeriod } from "@/utils/plan-duration";
+import { useCurrency } from "@/contexts/currency-context";
 
 
 declare global {
@@ -62,6 +63,7 @@ export function CheckoutDialog({
   const [phoneNumber, setPhoneNumber] = useState('');
   const [mpesaResponse, setMpesaResponse] = useState<any>(null);
   const { toast } = useToast();
+  const { formatCurrency, currency } = useCurrency();
 
   const checkoutMutation = useMutation({
     mutationFn: async () => {
@@ -143,6 +145,14 @@ export function CheckoutDialog({
 
 
     if (selectedMethod === 'mpesa') {
+      if (currency !== 'KES') {
+        toast({
+          title: "Currency Mismatch",
+          description: `MPESA only supports KES (Kenyan Shillings). Current configured currency is ${currency}. Please change the default currency to KES in General Settings.`,
+          variant: "destructive"
+        });
+        return;
+      }
       if (!phoneNumber) {
         toast({
           title: "Phone Number Required",
@@ -157,6 +167,54 @@ export function CheckoutDialog({
         toast({
           title: "Invalid Phone Number",
           description: "Please enter a valid Kenyan phone number (format: 254XXXXXXXXX)",
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+    if (selectedMethod === 'moyasar') {
+      if (currency !== 'SAR') {
+        toast({
+          title: "Currency Mismatch",
+          description: `Moyasar only supports SAR (Saudi Riyal). Current configured currency is ${currency}. Please change the default currency to SAR in General Settings.`,
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+
+    if (selectedMethod === 'stripe') {
+      const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+      if (!supportedCurrencies.includes(currency.toUpperCase())) {
+        toast({
+          title: "Currency Not Supported",
+          description: `Currency ${currency} is not supported by Stripe. Please configure a supported currency in General Settings.`,
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+    if (selectedMethod === 'paypal') {
+      const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+      if (!supportedCurrencies.includes(currency.toUpperCase())) {
+        toast({
+          title: "Currency Not Supported",
+          description: `Currency ${currency} may not be supported by PayPal. Please verify your PayPal account configuration supports this currency.`,
+          variant: "destructive"
+        });
+        return;
+      }
+    }
+
+    if (selectedMethod === 'mercadopago') {
+      const supportedCurrencies = ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'VEF'];
+      if (!supportedCurrencies.includes(currency.toUpperCase())) {
+        toast({
+          title: "Currency Not Supported",
+          description: `Currency ${currency} may not be supported by Mercado Pago. Supported currencies: ${supportedCurrencies.join(', ')}. Please verify your Mercado Pago account configuration.`,
           variant: "destructive"
         });
         return;
@@ -288,7 +346,7 @@ export function CheckoutDialog({
               <CardContent className="space-y-3">
                 <div className="flex justify-between items-center p-3 bg-muted rounded-lg">
                   <span className="font-semibold">Amount:</span>
-                  <span className="text-lg font-bold">${plan?.price}</span>
+                  <span className="text-lg font-bold">{formatCurrency(plan?.price || 0)}</span>
                 </div>
 
                 <div className="space-y-2">
@@ -451,7 +509,7 @@ export function CheckoutDialog({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Amount:</span>
-                  <span className="font-medium">{moyasarConfig.amount / 100} SAR</span>
+                  <span className="font-medium">{formatCurrency(moyasarConfig.amount / 100)}</span>
                 </div>
               </div>
             </div>
@@ -492,7 +550,7 @@ export function CheckoutDialog({
                 </div>
                 <div className="flex justify-between mb-2">
                   <span className="text-muted-foreground">Amount:</span>
-                  <span className="font-medium">{plan.price} KES</span>
+                  <span className="font-medium">{formatCurrency(plan.price)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Phone:</span>
@@ -560,7 +618,7 @@ export function CheckoutDialog({
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Price:</span>
-                <span className="font-medium">${plan.price}{getPlanBillingPeriod(plan)}</span>
+                <span className="font-medium">{formatCurrency(plan.price)}{getPlanBillingPeriod(plan)}</span>
               </div>
             </div>
           </div>

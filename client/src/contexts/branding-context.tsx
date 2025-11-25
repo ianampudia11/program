@@ -12,7 +12,7 @@ export type BrandingSettings = {
 };
 
 const DEFAULT_BRANDING: BrandingSettings = {
-  appName: "BotHive",
+  appName: "PowerChat",
   primaryColor: "#333235",
   secondaryColor: "#4F46E5",
 };

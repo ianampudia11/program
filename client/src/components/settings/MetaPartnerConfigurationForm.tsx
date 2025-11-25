@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { Loader2, TestTube, CheckCircle, AlertCircle } from 'lucide-react';
+import { MetaWhatsAppIntegratedOnboarding } from './MetaWhatsAppIntegratedOnboarding';
 
 interface Props {
   isOpen: boolean;
@@ -19,6 +20,7 @@ interface MetaPartnerConfigFormData {
   businessManagerId: string;
   webhookVerifyToken: string;
   accessToken: string;
+  configId: string;
   webhookUrl: string;
   companyName: string;
   logoUrl: string;
@@ -30,6 +32,7 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
   const [isValidating, setIsValidating] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [existingConfig, setExistingConfig] = useState<any>(null);
+  const [showTestOnboarding, setShowTestOnboarding] = useState(false);
 
   const [formData, setFormData] = useState<MetaPartnerConfigFormData>({
     appId: '',
@@ -37,6 +40,7 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
     businessManagerId: '',
     webhookVerifyToken: '',
     accessToken: '',
+    configId: '',
     webhookUrl: '',
     companyName: '',
     logoUrl: ''
@@ -65,6 +69,7 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
           businessManagerId: config.partnerId || '', // Business Manager ID stored as partnerId
           webhookVerifyToken: config.webhookVerifyToken || '',
           accessToken: config.accessToken || '',
+          configId: config.configId || '',
           webhookUrl: config.partnerWebhookUrl || '',
           companyName: config.publicProfile?.companyName || '',
           logoUrl: config.publicProfile?.logoUrl || ''
@@ -115,8 +120,10 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
       if (response.ok && result.valid) {
         toast({
           title: "Success",
-          description: "Meta Partner API credentials are valid!",
+          description: "Meta Partner API credentials are valid! Opening test signup flow...",
         });
+
+        setShowTestOnboarding(true);
         return true;
       } else {
         toast({
@@ -161,6 +168,7 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
         partnerId: formData.businessManagerId, // Store Business Manager ID as partnerId
         webhookVerifyToken: formData.webhookVerifyToken,
         accessToken: formData.accessToken,
+        configId: formData.configId,
         partnerWebhookUrl: formData.webhookUrl,
         redirectUrl: `${window.location.origin}/settings/channels/meta/callback`,
         publicProfile: {
@@ -303,6 +311,20 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
               </div>
 
               <div>
+                <Label htmlFor="configId">WhatsApp Configuration ID</Label>
+                <Input
+                  id="configId"
+                  name="configId"
+                  value={formData.configId}
+                  onChange={handleInputChange}
+                  placeholder="WhatsApp Configuration ID for embedded signup"
+                />
+                <p className="text-sm text-gray-500 mt-1">
+                  This is the Configuration ID from your Meta App's WhatsApp Business API settings
+                </p>
+              </div>
+
+              <div>
                 <Label htmlFor="webhookUrl">Webhook URL</Label>
                 <Input
                   id="webhookUrl"
@@ -377,6 +399,19 @@ export function MetaPartnerConfigurationForm({ isOpen, onClose, onSuccess }: Pro
           </form>
         )}
       </DialogContent>
+
+      {/* Test Onboarding Modal */}
+      <MetaWhatsAppIntegratedOnboarding
+        isOpen={showTestOnboarding}
+        onClose={() => setShowTestOnboarding(false)}
+        onSuccess={() => {
+          setShowTestOnboarding(false);
+          toast({
+            title: "Test Successful",
+            description: "The embedded signup flow is working correctly!",
+          });
+        }}
+      />
     </Dialog>
   );
 }

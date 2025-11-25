@@ -191,7 +191,7 @@ export default function EditContactModal({ contact, isOpen, onClose }: EditConta
                   <SelectValue placeholder={t('contacts.edit.select_channel_placeholder', 'Select channel')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="whatsapp">{t('contacts.edit.channel.whatsapp_official', 'WhatsApp Official')}</SelectItem>
+                  <SelectItem value="whatsapp_official">{t('contacts.edit.channel.whatsapp_official', 'WhatsApp Official')}</SelectItem>
                   <SelectItem value="whatsapp_unofficial">{t('contacts.edit.channel.whatsapp_unofficial', 'WhatsApp Unofficial')}</SelectItem>
                   <SelectItem value="messenger">{t('contacts.edit.channel.messenger', 'Facebook Messenger')}</SelectItem>
                   <SelectItem value="instagram">{t('contacts.edit.channel.instagram', 'Instagram')}</SelectItem>

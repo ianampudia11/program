@@ -43,9 +43,7 @@ export const ensureActiveSubscription = async (req: Request, res: Response, next
     const accessCheck = await planLimitsService.checkApplicationAccess(user.companyId);
 
 
-    if (!accessCheck.allowed && accessCheck.limitType === 'subscription_expired') {
-
-    }
+    
 
 
 

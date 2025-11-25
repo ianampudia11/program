@@ -653,7 +653,7 @@ function FlowImportDialog({
         <div className="space-y-4">
           {/* File Drop Zone */}
           <div
-            className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+            className={`relative border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
               isDragging ? 'border-primary bg-primary/5' : 'border-muted-foreground/25'
             }`}
             onDrop={handleDrop}

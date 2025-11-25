@@ -113,7 +113,7 @@ export class AiCredentialsService {
         baseURL: 'https://openrouter.ai/api/v1',
         defaultHeaders: {
           'HTTP-Referer': 'https://powerchat.plus',
-          'X-Title': 'BotHive Plus'
+          'X-Title': 'PowerChat Plus'
         }
       });
 

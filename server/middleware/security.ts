@@ -6,15 +6,7 @@ import helmet from 'helmet';
  */
 export function setupSecurityMiddleware(app: any) {
 
-  const disableCSP = true; // process.env.DISABLE_CSP === 'true';
-
-  
-  
-  
-  
-  
-  
-
+  const disableCSP = true; 
 
   app.use(helmet({
     contentSecurityPolicy: disableCSP ? false : {
@@ -42,7 +34,8 @@ export function setupSecurityMiddleware(app: any) {
         manifestSrc: ["'self'"],
       },
     },
-    crossOriginEmbedderPolicy: false, // Disable for compatibility
+    crossOriginEmbedderPolicy: false, 
+    xFrameOptions: false, 
     hsts: {
       maxAge: 31536000,
       includeSubDomains: true,
@@ -54,6 +47,28 @@ export function setupSecurityMiddleware(app: any) {
 
 
 
+  const isWebChatWidgetEndpoint = (path: string): boolean => {
+    return (
+      path === '/api/webchat/widget.js' ||
+      path === '/api/webchat/widget.html' ||
+      path.startsWith('/api/webchat/embed/') ||
+      path.startsWith('/api/webchat/config/') ||
+      path === '/api/webchat/session' ||
+      path === '/api/webchat/message' ||
+      path.startsWith('/api/webchat/messages/') ||
+      path === '/api/webchat/upload'
+    );
+  };
+
+  app.options('/api/webchat/*', (req: Request, res: Response) => {
+    if (isWebChatWidgetEndpoint(req.path)) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    }
+    res.status(200).end();
+  });
+
   app.use((req: Request, res: Response, next: NextFunction) => {
 
     res.removeHeader('X-Powered-By');
@@ -62,15 +77,55 @@ export function setupSecurityMiddleware(app: any) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
 
-    if (req.query.embed === 'true') {
-      res.setHeader('X-Frame-Options', 'ALLOWALL');
+    const embedCookie = (req as any).cookies?.['powerchat_embed_context'];
+    const secFetchDest = req.headers['sec-fetch-dest'];
+    const isIframeRequest = secFetchDest === 'iframe';
+    
+    const isEmbedded = 
+      req.query.embed === 'true' || 
+      (req as any).isEmbedded === true || 
+      embedCookie === 'true' ||
+      isIframeRequest;
+
+    if (isWebChatWidgetEndpoint(req.path)) {
 
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      if (req.path.startsWith('/api/webchat/embed/')) {
+        res.setHeader('Content-Security-Policy', 'frame-ancestors *');
+      }
     } else {
-      res.setHeader('X-Frame-Options', 'DENY');
+
+
+      if (isEmbedded) {
+
+
+
+        res.setHeader('Content-Security-Policy', 'frame-ancestors *');
+      } else {
+
+
+        const isHtmlResponse = !req.path.startsWith('/api/') && 
+                              !req.path.startsWith('/public/') &&
+                              (req.path === '/' || !req.path.includes('.'));
+        
+        if (isHtmlResponse) {
+
+
+          if (secFetchDest === 'document' || secFetchDest === 'empty') {
+
+            res.setHeader('X-Frame-Options', 'DENY');
+          } else {
+
+
+            res.setHeader('Content-Security-Policy', 'frame-ancestors *');
+          }
+        } else {
+
+          res.setHeader('X-Frame-Options', 'DENY');
+        }
+      }
     }
 
     res.setHeader('X-XSS-Protection', '1; mode=block');
@@ -92,14 +147,42 @@ export function setupSecurityMiddleware(app: any) {
   });
 
 
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+
+    const isAdminRoute = req.path.startsWith('/api/admin');
+    const isHealthCheck = req.path === '/health' || req.path === '/api/health';
+
+    if (isHealthCheck || isAdminRoute) {
+      return next();
+    }
+
+    try {
+      const { storage } = await import('../storage');
+      const maintenanceModeSetting = await storage.getAppSetting('system.maintenanceMode');
+
+      if (maintenanceModeSetting?.value === true) {
+        return res.status(503).json({
+          error: 'Service Unavailable',
+          message: 'System is currently under maintenance. Please try again later.',
+          maintenanceMode: true
+        });
+      }
+    } catch (error) {
+      console.error('Error checking maintenance mode:', error);
+    }
+
+    next();
+  });
+
+
   app.use((req: Request, res: Response, next: NextFunction) => {
 
     const suspiciousPatterns = [
-      /\.\.\//g, // Directory traversal
-      /<script/gi, // XSS attempts
-      /union.*select/gi, // SQL injection
-      /javascript:/gi, // JavaScript injection
-      /vbscript:/gi, // VBScript injection
+      /\.\.\//g, 
+      /<script/gi,
+      /union.*select/gi, 
+      /javascript:/gi, 
+      /vbscript:/gi,
     ];
 
     const checkString = (str: string): boolean => {

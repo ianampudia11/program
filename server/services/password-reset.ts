@@ -142,10 +142,10 @@ export class PasswordResetService {
       await db.insert(passwordResetTokens).values(tokenData);
 
 
-      const baseUrl = await this.getSystemBaseUrl(request.baseUrl);
+      const baseUrl = request.baseUrl || process.env.FRONTEND_URL || 'http://localhost:9000';
       const resetPath = request.isAdmin ? '/admin/reset-password' : '/reset-password';
       const resetUrl = `${baseUrl}${resetPath}?token=${token}`;
-      const emailSent = await this.sendPasswordResetEmail(user.email, user.fullName, resetUrl, baseUrl, request.isAdmin);
+      const emailSent = await this.sendPasswordResetEmail(user.email, user.fullName, resetUrl, request.baseUrl, request.isAdmin);
 
       if (!emailSent) {
 
@@ -270,80 +270,32 @@ export class PasswordResetService {
   }
 
   /**
-   * Get the system base URL from various sources in priority order
-   * Priority: Request URL > App Setting > Environment Variables > Localhost (dev only)
-   */
-  private static async getSystemBaseUrl(requestBaseUrl?: string): Promise<string> {
-
-
-
-    if (requestBaseUrl) {
-      const trimmedUrl = requestBaseUrl.trim().replace(/\/$/, '');
-
-
-      if (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://')) {
-
-        if (process.env.NODE_ENV === 'production' &&
-            (trimmedUrl.includes('localhost') || trimmedUrl.includes('127.0.0.1'))) {
-          console.warn('⚠️ Password reset: Received localhost URL in production, falling back to other sources');
-        } else {
-
-          return trimmedUrl;
-        }
-      }
-    }
-
-
-    try {
-      const systemUrlSetting = await storage.getAppSetting('system_url');
-      if (systemUrlSetting?.value && typeof systemUrlSetting.value === 'string') {
-        const settingUrl = systemUrlSetting.value.trim().replace(/\/$/, '');
-        if (settingUrl && (settingUrl.startsWith('http://') || settingUrl.startsWith('https://'))) {
-
-          return settingUrl;
-        }
-      }
-    } catch (error) {
-      console.error('❌ Error fetching system_url setting:', error);
-    }
-
-
-    const envUrl = process.env.APP_URL || process.env.BASE_URL || process.env.PUBLIC_URL || process.env.FRONTEND_URL;
-    if (envUrl) {
-      const trimmedEnvUrl = envUrl.trim().replace(/\/$/, '');
-
-      return trimmedEnvUrl;
-    }
-
-
-
-    console.warn('⚠️ Password reset: No system URL configured, falling back to HOST/PORT construction');
-    const basePort = process.env.PORT || '9000';
-    const host = process.env.HOST || 'localhost';
-    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-
-    if (host === 'localhost' || host === '127.0.0.1') {
-      const fallbackUrl = `${protocol}://${host}:${basePort}`;
-      console.warn('⚠️ Password reset: Using fallback URL:', fallbackUrl);
-      return fallbackUrl;
-    } else {
-      const fallbackUrl = `${protocol}://${host}`;
-
-      return fallbackUrl;
-    }
-  }
-
-  /**
    * Convert relative URL to absolute URL for email clients
    */
-  private static async convertToAbsoluteUrl(url: string, systemBaseUrl: string): Promise<string> {
+  private static convertToAbsoluteUrl(url: string, requestBaseUrl?: string): string {
     if (!url) return '';
 
     if (url.startsWith('http://') || url.startsWith('https://')) {
       return url;
     }
 
-    const baseUrl = systemBaseUrl.replace(/\/$/, '');
+
+    let baseUrl = requestBaseUrl || process.env.APP_URL || process.env.BASE_URL || process.env.PUBLIC_URL;
+
+    if (!baseUrl) {
+      const basePort = process.env.PORT || '9000';
+      const host = process.env.HOST || 'localhost';
+      const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+
+      if (host === 'localhost' || host === '127.0.0.1') {
+        baseUrl = `${protocol}://${host}:${basePort}`;
+      } else {
+        baseUrl = `${protocol}://${host}`;
+      }
+    }
+
+
+    baseUrl = baseUrl.replace(/\/$/, '');
     const cleanUrl = url.startsWith('/') ? url : `/${url}`;
 
     return `${baseUrl}${cleanUrl}`;
@@ -367,12 +319,12 @@ export class PasswordResetService {
       }
 
       return {
-        appName: (brandingValue as any)?.appName || 'BotHive',
+        appName: (brandingValue as any)?.appName || 'PowerChat',
         logoUrl: logoSetting?.value as string
       };
     } catch (error) {
       console.error('Error getting branding settings:', error);
-      return { appName: 'BotHive' };
+      return { appName: 'PowerChat' };
     }
   }
 
@@ -383,13 +335,13 @@ export class PasswordResetService {
     to: string,
     fullName: string,
     resetUrl: string,
-    systemBaseUrl: string,
+    requestBaseUrl?: string,
     isAdmin: boolean = false
   ): Promise<boolean> {
     const branding = await this.getBrandingSettings();
     const accountType = isAdmin ? 'Admin' : '';
     const subject = `${accountType} Password Reset Request - ${branding.appName}`.trim();
-
+    
     const accountDescription = isAdmin ? `${branding.appName} admin account` : `${branding.appName} account`;
     const securityNote = isAdmin ?
       'This is an admin password reset request. If you did not request this, please contact your system administrator immediately.' :
@@ -412,7 +364,7 @@ ${branding.appName} Team
     `.trim();
 
 
-    const logoUrl = branding.logoUrl ? await this.convertToAbsoluteUrl(branding.logoUrl, systemBaseUrl) : null;
+    const logoUrl = branding.logoUrl ? this.convertToAbsoluteUrl(branding.logoUrl, requestBaseUrl) : null;
 
     const logoSection = logoUrl
       ? `<img src="${logoUrl}" alt="${branding.appName}" style="height: 40px; margin-bottom: 10px;">`

@@ -8,6 +8,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
 import { ContactAvatar } from '@/components/contacts/ContactAvatar';
 import { ClearChatHistoryDialog } from './ClearChatHistoryDialog';
+import { TwilioIcon } from '@/components/icons/TwilioIcon';
 import EditContactDialog from './EditContactDialog';
 import useSocket from '@/hooks/useSocket';
 import { useMobileLayout } from '@/contexts/mobile-layout-context';
@@ -124,8 +125,10 @@ export default function ContactDetails({
         return { icon: 'ri-instagram-line', color: '#E4405F', name: t('contacts.details.channel.instagram', 'Instagram') };
       case 'email':
         return { icon: 'ri-mail-line', color: '#3B82F6', name: t('contacts.details.channel.email', 'Email') };
+      case 'webchat':
+        return { icon: 'ri-message-3-line', color: '#6366f1', name: t('contacts.details.channel.webchat', 'WebChat') };
       default:
-        return { icon: 'ri-chat-1-line', color: '#333235', name: t('contacts.details.channel.chat', 'Chat') };
+        return { icon: 'twilio', isComponent: true, color: '#333235', name: t('contacts.details.channel.chat', 'Twilio SMS/MMS') };
     }
   };
 
@@ -229,7 +232,11 @@ export default function ContactDetails({
             <div>
               <p className="text-xs text-gray-500">{t('contacts.details.channel', 'Channel')}</p>
               <p className="text-sm flex items-center">
-                <i className={channelInfo.icon + " mr-1"} style={{ color: channelInfo.color }}></i>
+                {channelInfo.isComponent ? (
+                  <TwilioIcon className="w-4 h-4 mr-1" style={{ color: channelInfo.color }} />
+                ) : (
+                  <i className={channelInfo.icon + " mr-1"} style={{ color: channelInfo.color }}></i>
+                )}
                 {channelInfo.name}
               </p>
             </div>

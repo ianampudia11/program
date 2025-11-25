@@ -17,8 +17,7 @@ const chatRequestSchema = z.object({
     content: z.string(),
     timestamp: z.string().transform(str => new Date(str))
   })).default([]),
-  credentialSource: z.enum(['auto', 'company', 'system', 'manual']).default('auto'),
-  apiKey: z.string().optional()
+  credentialSource: z.enum(['auto', 'company', 'system']).default('auto')
 });
 
 const flowAnalysisSchema = z.object({
@@ -238,7 +237,7 @@ Please create a comprehensive flow with:
 4. Error handling and fallbacks
 5. Variable usage for personalization
 
-Make it production-ready and follow BotHive best practices.`;
+Make it production-ready and follow PowerChat best practices.`;
 
     const chatRequest = {
       message: templatePrompt,
@@ -288,7 +287,7 @@ router.get('/node-help/:nodeType', ensureAuthenticated, async (req, res) => {
       });
     }
 
-    const helpPrompt = `Provide comprehensive help and configuration guidance for the "${nodeType}" node type in BotHive. Include:
+    const helpPrompt = `Provide comprehensive help and configuration guidance for the "${nodeType}" node type in PowerChat. Include:
 
 1. **Purpose & Use Cases**: What this node does and when to use it
 2. **Configuration Options**: All available settings and parameters

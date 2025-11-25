@@ -13,14 +13,13 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations/001-initial-schema.sql:/docker-entrypoint-initdb.d/01-initial-schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # BotHive Application (Backend + Frontend)
+  # PowerChat Application (Backend + Frontend)
   app:
     build:
       context: .
@@ -31,6 +30,7 @@ services:
         condition: service_healthy
     environment:
       - NODE_ENV=production
+      - PORT=9000
       - DATABASE_URL=postgresql://postgres:root@postgres:5432/powerchat
       - PGSSLMODE=disable
       - SESSION_SECRET=powerchat-docker-secret
@@ -41,13 +41,15 @@ services:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}
-      - BASE_URL=${BASE_URL:-http://localhost:5000}
+      - BASE_URL=${BASE_URL:-http://localhost:9000}
       - DOCKER_CONTAINER=true
     ports:
-      - "5000:5000"
+      - "9000:9000"
     volumes:
       - ./uploads:/app/uploads
       - ./whatsapp-sessions:/app/whatsapp-sessions
+      - ./data:/app/data
+      - ./migrations:/app/migrations
       # Auto-update volumes
       - powerchat_updates:/app/volumes/updates
       - powerchat_backups:/app/volumes/backups

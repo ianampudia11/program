@@ -21,6 +21,7 @@ export interface CacheAwareMessageResult {
   total: number;
   fromCache: boolean;
   cacheHitRate?: number;
+  staleMediaCount?: number;
 }
 
 export interface UseMessageCacheOptions {
@@ -89,6 +90,10 @@ export function useMessageCache(options: UseMessageCacheOptions = {}) {
               prefetchNextPage(conversationId, page + 1, limit, isGroup).catch(console.error);
             }
 
+            if (cacheResult.staleMediaCount && cacheResult.staleMediaCount > 0) {
+              refreshStaleMediaUrls(cacheResult.messages).catch(console.error);
+            }
+
             return {
               ...cacheResult,
               fromCache: true,
@@ -97,7 +102,6 @@ export function useMessageCache(options: UseMessageCacheOptions = {}) {
           }
         }
       }
-
 
       const apiResult = await loadMessagesFromAPI(conversationId, page, limit, isGroup);
 
@@ -142,7 +146,8 @@ export function useMessageCache(options: UseMessageCacheOptions = {}) {
       messages: result.messages,
       hasMore: result.hasMore,
       total: result.total,
-      fromCache: true
+      fromCache: true,
+      staleMediaCount: result.staleMediaCount
     };
   }, []);
 
@@ -291,6 +296,63 @@ export function useMessageCache(options: UseMessageCacheOptions = {}) {
     }
   }, [enabled, initializeCache]);
 
+  /**
+   * Refresh stale media URLs in background
+   */
+  const refreshStaleMediaUrls = useCallback(async (messages: any[]): Promise<void> => {
+    const staleMessages = messages.filter(msg => {
+      if (!msg.mediaUrl || !msg.type) return false;
+      const mediaTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+      if (!mediaTypes.includes(msg.type)) return false;
+      
+      if (!msg.mediaUrlFetchedAt) return true;
+      
+      const age = Date.now() - msg.mediaUrlFetchedAt;
+      return age > (24 * 60 * 60 * 1000);
+    });
+
+    if (staleMessages.length === 0) return;
+
+    const refreshPromises = staleMessages.map(async (msg) => {
+      try {
+        const response = await apiRequest('POST', `/api/messages/${msg.id}/download-media`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.mediaUrl) {
+            await messageCacheService.refreshMediaUrl(msg.id, data.mediaUrl);
+          }
+        }
+      } catch (error) {
+        console.warn(`Failed to refresh media URL for message ${msg.id}:`, error);
+      }
+    });
+
+    await Promise.allSettled(refreshPromises);
+  }, []);
+
+  /**
+   * Refresh media URL for a specific message
+   */
+  const refreshMediaUrl = useCallback(async (messageId: number): Promise<string | null> => {
+    if (!enabled) return null;
+
+    try {
+      const response = await apiRequest('POST', `/api/messages/${messageId}/download-media`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.mediaUrl) {
+          await initializeCache();
+          await messageCacheService.refreshMediaUrl(messageId, data.mediaUrl);
+          return data.mediaUrl;
+        }
+      }
+      return null;
+    } catch (error) {
+      console.error('Error refreshing media URL:', error);
+      return null;
+    }
+  }, [enabled, initializeCache]);
+
   return {
     loadMessages,
     addMessageToCache,
@@ -299,6 +361,7 @@ export function useMessageCache(options: UseMessageCacheOptions = {}) {
     invalidateConversationCache,
     getCacheStats,
     cleanupCache,
+    refreshMediaUrl,
     isEnabled: enabled
   };
 }

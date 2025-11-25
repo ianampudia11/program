@@ -25,6 +25,26 @@ fsExtra.ensureDirSync(MEDIA_DIR);
 const mediaCache = new Map<string, string>();
 
 /**
+ * Normalize phone number to +E.164 format
+ * @param phone The phone number to normalize
+ * @returns Normalized phone number in +E.164 format
+ */
+function normalizePhoneToE164(phone: string): string {
+  if (!phone) return phone;
+
+
+  let normalized = phone.replace(/[^\d+]/g, '');
+
+
+  if (normalized.startsWith('+')) {
+    return normalized;
+  }
+
+
+  return '+' + normalized;
+}
+
+/**
  * Get file extension from media type
  */
 function getFileExtensionFromMediaType(mediaType: string): string {
@@ -392,10 +412,7 @@ export async function sendWhatsAppBusinessMessage(
     }
 
 
-    let formattedNumber = to.replace(/[^0-9]/g, '');
-    if (!formattedNumber.startsWith('+')) {
-      formattedNumber = `+${formattedNumber}`;
-    }
+    const normalizedPhone = normalizePhoneToE164(to);
 
 
     const response = await axios.post(
@@ -403,7 +420,7 @@ export async function sendWhatsAppBusinessMessage(
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: formattedNumber,
+        to: normalizedPhone,
         type: 'text',
         text: {
           body: message
@@ -482,10 +499,7 @@ export async function sendWhatsAppTestTemplate(
     }
 
 
-    let formattedNumber = to.replace(/[^0-9]/g, '');
-    if (!formattedNumber.startsWith('+')) {
-      formattedNumber = `+${formattedNumber}`;
-    }
+    const normalizedPhone = normalizePhoneToE164(to);
 
 
     const response = await axios.post(
@@ -493,7 +507,7 @@ export async function sendWhatsAppTestTemplate(
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to: formattedNumber,
+        to: normalizedPhone,
         type: 'template',
         template: {
           name: templateName,
@@ -533,6 +547,295 @@ export async function sendWhatsAppTestTemplate(
 }
 
 /**
+ * Send a WhatsApp template message with variables (for campaigns)
+ * @param connectionId The ID of the channel connection
+ * @param userId The user ID sending the message
+ * @param companyId The company ID for multi-tenant security
+ * @param to The recipient phone number (with country code)
+ * @param templateName The name of the approved template
+ * @param languageCode The language code for the template (e.g., 'en', 'en_US')
+ * @param components Optional template components (header, body, buttons with variables)
+ * @param skipBroadcast Whether to skip broadcasting the message to clients (default: false)
+ * @returns The message result with messageId
+ */
+export async function sendTemplateMessage(
+  connectionId: number,
+  userId: number,
+  companyId: number,
+  to: string,
+  templateName: string,
+  languageCode: string = 'en',
+  components?: Array<{
+    type: 'header' | 'body' | 'button';
+    parameters?: Array<{ type: 'text' | 'currency' | 'date_time' | 'image' | 'document' | 'video'; text?: string; [key: string]: any }>;
+    sub_type?: string;
+    index?: string;
+  }>,
+  skipBroadcast: boolean = false
+): Promise<any> {
+  try {
+    if (!companyId) {
+      throw new Error('Company ID is required for multi-tenant security');
+    }
+
+    const connection = await storage.getChannelConnection(connectionId);
+    if (!connection) {
+      throw new Error(`Connection with ID ${connectionId} not found`);
+    }
+
+    if (connection.companyId !== companyId) {
+      throw new Error(`Access denied: Connection does not belong to company ${companyId}`);
+    }
+
+    const connectionData = connection.connectionData as any;
+    const accessToken = connection.accessToken || connectionData?.accessToken;
+    const phoneNumberId = connectionData?.phoneNumberId;
+
+    if (!accessToken) {
+      throw new Error('WhatsApp Business API access token is missing');
+    }
+
+    if (!phoneNumberId) {
+      throw new Error('WhatsApp Business API phone number ID is missing');
+    }
+
+
+    const normalizedPhone = normalizePhoneToE164(to);
+
+    const templatePayload: any = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: normalizedPhone,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: {
+          code: languageCode
+        }
+      }
+    };
+
+
+    if (components && components.length > 0) {
+      templatePayload.template.components = components;
+    }
+
+
+    const response = await axios.post(
+      `${WHATSAPP_GRAPH_URL}/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`,
+      templatePayload,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (response.status === 200 && response.data) {
+      const messageId = response.data.messages?.[0]?.id;
+
+
+      try {
+
+        let contact = await storage.getContactByPhone(normalizedPhone, companyId);
+        if (!contact) {
+          contact = await storage.getOrCreateContact({
+            companyId: companyId,
+            name: normalizedPhone,
+            phone: normalizedPhone,
+            email: null,
+            avatarUrl: null,
+            identifier: normalizedPhone,
+            identifierType: 'whatsapp',
+            source: 'whatsapp_official',
+            notes: null
+          });
+        }
+
+
+        let conversation = await storage.getConversationByContactAndChannel(contact.id, connectionId);
+        if (!conversation) {
+          conversation = await storage.createConversation({
+            companyId: companyId,
+            contactId: contact.id,
+            channelId: connectionId,
+            channelType: 'whatsapp_official',
+            status: 'open',
+            assignedToUserId: userId,
+            lastMessageAt: new Date()
+          });
+        }
+
+
+        let templateRecord: any = null;
+        try {
+          const db = (await import('../../db')).db;
+          const { campaignTemplates } = await import('@shared/schema');
+          const { eq, and } = await import('drizzle-orm');
+          
+          const templates = await db.select()
+            .from(campaignTemplates)
+            .where(and(
+              eq(campaignTemplates.whatsappTemplateName, templateName),
+              eq(campaignTemplates.companyId, companyId)
+            ))
+            .limit(1);
+          
+          templateRecord = templates[0];
+        } catch (err) {
+          console.error('Error fetching template record:', err);
+        }
+
+
+        let messageContent = templateRecord?.content || '';
+        const metadata: any = {
+          templateName: templateName,
+          templateLanguage: languageCode,
+          templateComponents: components || [],
+          messageId: messageId
+        };
+
+
+        if (components && components.length > 0) {
+          for (const component of components) {
+            if (component.type === 'header' && component.parameters) {
+              for (const param of component.parameters) {
+                if (param.type === 'text' && param.text) {
+
+                  messageContent = messageContent.replace('{{1}}', param.text);
+                } else if (param.type === 'image' && param.image) {
+                  const imageValue = (param.image as any).link || (param.image as any).id;
+
+                  if (imageValue && /^[0-9]+$/.test(imageValue)) {
+                    try {
+                      const downloadedUrl = await downloadAndSaveMedia(imageValue, accessToken, 'image');
+                      metadata.headerImage = downloadedUrl || imageValue;
+                    } catch (err) {
+                      console.error('Error downloading header image:', err);
+                      metadata.headerImage = imageValue;
+                    }
+                  } else {
+                    metadata.headerImage = imageValue;
+                  }
+                } else if (param.type === 'video' && param.video) {
+                  const videoValue = (param.video as any).link || (param.video as any).id;
+
+                  if (videoValue && /^[0-9]+$/.test(videoValue)) {
+                    try {
+                      const downloadedUrl = await downloadAndSaveMedia(videoValue, accessToken, 'video');
+                      metadata.headerVideo = downloadedUrl || videoValue;
+                    } catch (err) {
+                      console.error('Error downloading header video:', err);
+                      metadata.headerVideo = videoValue;
+                    }
+                  } else {
+                    metadata.headerVideo = videoValue;
+                  }
+                } else if (param.type === 'document' && param.document) {
+                  const documentValue = (param.document as any).link || (param.document as any).id;
+
+                  if (documentValue && /^[0-9]+$/.test(documentValue)) {
+                    try {
+                      const downloadedUrl = await downloadAndSaveMedia(documentValue, accessToken, 'document');
+                      metadata.headerDocument = downloadedUrl || documentValue;
+                    } catch (err) {
+                      console.error('Error downloading header document:', err);
+                      metadata.headerDocument = documentValue;
+                    }
+                  } else {
+                    metadata.headerDocument = documentValue;
+                  }
+                  metadata.documentFilename = (param.document as any).filename;
+                }
+              }
+            } else if (component.type === 'body' && component.parameters) {
+
+              component.parameters.forEach((param: any, index: number) => {
+                if (param.type === 'text' && param.text) {
+
+                  const placeholder = `{{${index + 1}}}`;
+                  messageContent = messageContent.replace(new RegExp(placeholder, 'g'), param.text);
+                }
+              });
+            }
+          }
+        }
+
+
+        if (!messageContent || messageContent.trim() === '') {
+          messageContent = `Template: ${templateName}`;
+        }
+
+
+        const existingMessage = await storage.getMessageByExternalId(messageId, companyId);
+        if (existingMessage) {
+
+          return {
+            success: true,
+            messageId,
+            id: messageId
+          };
+        }
+
+
+        const messageData = {
+          conversationId: conversation.id,
+          content: messageContent.trim(),
+          type: 'template',
+          direction: 'outbound',
+          status: 'sent',
+          metadata: JSON.stringify(metadata),
+          mediaUrl: null,
+          externalId: messageId,
+          senderId: userId,
+          senderType: 'user',
+          sentAt: new Date()
+        };
+
+        const savedMessage = await storage.createMessage(messageData);
+
+
+        await storage.updateConversation(conversation.id, {
+          lastMessageAt: new Date(),
+          status: 'active'
+        });
+
+
+        if (!skipBroadcast && (global as any).broadcastToAllClients) {
+          (global as any).broadcastToAllClients({
+            type: 'newMessage',
+            data: savedMessage
+          }, companyId);
+        }
+
+
+        eventEmitter.emit('newMessage', {
+          message: savedMessage,
+          conversation,
+          contact
+        });
+
+      } catch (dbError) {
+        console.error('Error saving template message to database:', dbError);
+
+      }
+
+      return {
+        success: true,
+        messageId,
+        id: messageId
+      };
+    } else {
+      throw new Error('Failed to send template message: Unknown error');
+    }
+  } catch (error: any) {
+    console.error('Error sending WhatsApp template message:', error.response?.data || error.message);
+    throw new Error(error.response?.data?.error?.message || error.message || 'Failed to send template message');
+  }
+}
+
+/**
  * Send a media message via WhatsApp Business API
  * @param connectionId The ID of the channel connection
  * @param userId The user ID who owns this connection
@@ -543,6 +846,7 @@ export async function sendWhatsAppTestTemplate(
  * @param filename Optional filename for document media
  * @param originalMimeType Optional original MIME type to preserve for audio files
  * @param isFromBot Whether the message is sent from a bot (default: false)
+ * @param skipBroadcast Whether to skip broadcasting the message to clients (default: false)
  */
 export async function sendWhatsAppBusinessMediaMessage(
   connectionId: number,
@@ -554,7 +858,8 @@ export async function sendWhatsAppBusinessMediaMessage(
   caption?: string,
   filename?: string,
   originalMimeType?: string,
-  isFromBot: boolean = false
+  isFromBot: boolean = false,
+  skipBroadcast: boolean = false
 ): Promise<any> {
   try {
     if (!companyId) {
@@ -582,10 +887,8 @@ export async function sendWhatsAppBusinessMediaMessage(
       throw new Error('WhatsApp Business API phone number ID is missing');
     }
 
-    let formattedNumber = to.replace(/[^0-9]/g, '');
-    if (!formattedNumber.startsWith('+')) {
-      formattedNumber = `+${formattedNumber}`;
-    }
+
+    const normalizedPhone = normalizePhoneToE164(to);
 
 
     let mediaId: string;
@@ -633,7 +936,7 @@ export async function sendWhatsAppBusinessMediaMessage(
     const mediaRequest: any = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: formattedNumber,
+      to: normalizedPhone,
       type: mediaType
     };
 
@@ -665,16 +968,16 @@ export async function sendWhatsAppBusinessMediaMessage(
       const messageId = response.data.messages?.[0]?.id;
 
 
-      let contact = await storage.getContactByPhone(to, companyId);
+      let contact = await storage.getContactByPhone(normalizedPhone, companyId);
       if (!contact) {
         const contactData: InsertContact = {
           companyId,
-          name: to,
-          phone: to,
+          name: normalizedPhone,
+          phone: normalizedPhone,
           email: null,
           avatarUrl: null,
-          identifier: to,
-          identifierType: 'whatsapp_official',
+          identifier: normalizedPhone,
+          identifierType: 'whatsapp',
           source: 'whatsapp_official',
           notes: null
         };
@@ -725,7 +1028,7 @@ export async function sendWhatsAppBusinessMediaMessage(
       });
 
 
-      if ((global as any).broadcastToAllClients) {
+      if (!skipBroadcast && (global as any).broadcastToAllClients) {
         (global as any).broadcastToAllClients({
           type: 'newMessage',
           data: savedMessage
@@ -745,6 +1048,28 @@ export async function sendWhatsAppBusinessMediaMessage(
   } catch (error: any) {
     console.error('Error sending WhatsApp Business media message:', error.response?.data || error.message);
     throw new Error(error.response?.data?.error?.message || error.message);
+  }
+}
+
+/**
+ * Process a message through the flow executor (extracted for reuse)
+ */
+async function processMessageThroughFlowExecutor(
+  message: any,
+  conversation: any,
+  contact: any,
+  channelConnection: any
+): Promise<void> {
+  try {
+    const flowExecutorModule = await import('../flow-executor');
+    const flowExecutor = flowExecutorModule.default;
+
+    if (contact) {
+      await flowExecutor.processIncomingMessage(message, conversation, contact, channelConnection);
+    }
+  } catch (error) {
+    console.error('Error in flow executor:', error);
+    throw error;
   }
 }
 
@@ -824,7 +1149,7 @@ async function handleIncomingWebhookMessage(
 ): Promise<void> {
   try {
     if (!message.from) {
-      
+
       return;
     }
 
@@ -833,19 +1158,27 @@ async function handleIncomingWebhookMessage(
     const timestamp = message.timestamp * 1000;
 
 
-    let contact = await storage.getContactByPhone(phoneNumber, connection.companyId!);
+    const normalizedPhone = normalizePhoneToE164(phoneNumber);
+
+    const existingMessage = await storage.getMessageByExternalId(messageId, connection.companyId || undefined);
+    if (existingMessage) {
+
+      return;
+    }
+
+    let contact = await storage.getContactByPhone(normalizedPhone, connection.companyId!);
 
     if (!contact) {
       const webhookContact = contacts?.find(c => c.wa_id === phoneNumber);
-      const contactName = webhookContact?.profile?.name || phoneNumber;
+      const contactName = webhookContact?.profile?.name || normalizedPhone;
 
       const contactData: InsertContact = {
         companyId: connection.companyId!, // Ensure contact belongs to the connection's company
         name: contactName,
-        phone: phoneNumber,
+        phone: normalizedPhone,
         email: null,
         avatarUrl: null,
-        identifier: phoneNumber,
+        identifier: normalizedPhone,
         identifierType: 'whatsapp',
         source: 'whatsapp_official',
         notes: null
@@ -890,7 +1223,7 @@ async function handleIncomingWebhookMessage(
     let messageContent = '';
     let mediaUrl = null;
     let mediaType = null;
-    const metadata: any = { messageId, timestamp };
+    const msgMetadata: any = { messageId, timestamp };
 
     if (message.type === 'text' && message.text) {
       messageType = 'text';
@@ -900,26 +1233,26 @@ async function handleIncomingWebhookMessage(
       messageType = 'image';
       mediaType = 'image';
       messageContent = message.image.caption || '';
-      metadata.mediaId = message.image.id;
+      msgMetadata.mediaId = message.image.id;
     }
     else if (message.type === 'video' && message.video) {
       messageType = 'video';
       mediaType = 'video';
       messageContent = message.video.caption || '';
-      metadata.mediaId = message.video.id;
+      msgMetadata.mediaId = message.video.id;
     }
     else if (message.type === 'audio' && message.audio) {
       messageType = 'audio';
       mediaType = 'audio';
       messageContent = '';
-      metadata.mediaId = message.audio.id;
+      msgMetadata.mediaId = message.audio.id;
     }
     else if (message.type === 'document' && message.document) {
       messageType = 'document';
       mediaType = 'document';
       messageContent = message.document.caption || '';
-      metadata.mediaId = message.document.id;
-      metadata.filename = message.document.filename;
+      msgMetadata.mediaId = message.document.id;
+      msgMetadata.filename = message.document.filename;
     }
     else if (message.type === 'location' && message.location) {
       messageType = 'location';
@@ -929,6 +1262,108 @@ async function handleIncomingWebhookMessage(
       if (message.location.name) {
         messageContent += ` - ${message.location.name}`;
       }
+    }
+    else if (message.type === 'interactive' && message.interactive) {
+      messageType = 'interactive';
+
+
+
+
+      if (message.interactive.type === 'button_reply' && message.interactive.button_reply) {
+        const buttonReply = message.interactive.button_reply;
+        messageContent = buttonReply.title || buttonReply.id || '';
+
+
+        msgMetadata.messageType = 'interactive';
+        msgMetadata.type = 'button';
+        msgMetadata.button = {
+          payload: buttonReply.id,
+          text: buttonReply.title
+        };
+
+
+      }
+
+      else if (message.interactive.type === 'list_reply' && message.interactive.list_reply) {
+        const listReply = message.interactive.list_reply;
+        messageContent = listReply.title || listReply.id || '';
+
+
+        msgMetadata.messageType = 'interactive';
+        msgMetadata.type = 'list';
+        msgMetadata.list = {
+          payload: listReply.id,
+          text: listReply.title,
+          description: listReply.description
+        };
+
+
+      }
+      else {
+        console.warn('🔘 Unknown interactive type:', message.interactive.type);
+        messageContent = `Interactive: ${message.interactive.type}`;
+      }
+    }
+    else if (message.type === 'template' && message.template) {
+     
+      const existingOutboundMessage = await storage.getMessageByExternalId(messageId, connection.companyId || undefined);
+      if (existingOutboundMessage && existingOutboundMessage.direction === 'outbound') {
+        return;
+      }
+      messageType = 'template';
+
+
+      msgMetadata.templateName = message.template.name;
+      msgMetadata.templateLanguage = message.template.language?.code || 'en';
+
+
+      const components = message.template.components || [];
+      let templateContent = '';
+
+      for (const component of components) {
+        if (component.type === 'header') {
+          if (component.parameters) {
+            for (const param of component.parameters) {
+              if (param.type === 'text') {
+                templateContent += param.text + '\n\n';
+              } else if (param.type === 'image' && param.image) {
+                msgMetadata.headerImage = param.image.link || param.image.id;
+                mediaType = 'image';
+              } else if (param.type === 'video' && param.video) {
+                msgMetadata.headerVideo = param.video.link || param.video.id;
+                mediaType = 'video';
+              } else if (param.type === 'document' && param.document) {
+                msgMetadata.headerDocument = param.document.link || param.document.id;
+                msgMetadata.documentFilename = param.document.filename;
+              }
+            }
+          }
+        } else if (component.type === 'body') {
+          if (component.parameters) {
+
+            let bodyText = component.text || '';
+            component.parameters.forEach((param: any, index: number) => {
+              if (param.type === 'text') {
+                bodyText = bodyText.replace(`{{${index + 1}}}`, param.text);
+              }
+            });
+            templateContent += bodyText;
+          } else if (component.text) {
+            templateContent += component.text;
+          }
+        } else if (component.type === 'footer') {
+          if (component.text) {
+            templateContent += '\n\n' + component.text;
+          }
+        } else if (component.type === 'button') {
+          msgMetadata.buttons = component.parameters || [];
+        }
+      }
+
+      messageContent = templateContent || message.text?.body || `Template: ${message.template.name}`;
+
+
+      msgMetadata.templateComponents = components;
     }
     else {
       messageType = 'unknown';
@@ -941,8 +1376,9 @@ async function handleIncomingWebhookMessage(
       type: messageType,
       direction: 'inbound',
       status: 'delivered',
-      metadata: JSON.stringify(metadata),
-      mediaUrl: null
+      metadata: JSON.stringify(msgMetadata),
+      mediaUrl: null,
+      externalId: messageId // Store WhatsApp message ID for idempotency
     };
 
     const savedMessage = await storage.createMessage(messageData);
@@ -956,7 +1392,7 @@ async function handleIncomingWebhookMessage(
 
     const updatedConversation = await storage.getConversation(conversation.id);
 
-    if (mediaType && metadata.mediaId && connection.accessToken) {
+    if (mediaType && msgMetadata.mediaId && connection.accessToken) {
       try {
       } catch (error) {
         console.error(`Error preparing media download for message ${messageId}:`, error);
@@ -996,7 +1432,16 @@ async function handleIncomingWebhookMessage(
       contact
     });
 
-    
+
+
+
+    try {
+      await processMessageThroughFlowExecutor(savedMessage, updatedConversation, contact, connection);
+    } catch (error) {
+      console.error('Error processing message through flow executor:', error);
+    }
+
+
   } catch (error) {
     console.error('Error handling incoming webhook message:', error);
   }
@@ -1191,17 +1636,19 @@ async function findOrCreateConversation(connectionId: number, phoneNumber: strin
   }
 
 
-  let contact = await storage.getContactByPhone(phoneNumber, companyId);
+  const normalizedPhone = normalizePhoneToE164(phoneNumber);
+
+  let contact = await storage.getContactByPhone(normalizedPhone, companyId);
 
   if (!contact) {
     const contactData: InsertContact = {
       companyId: companyId, // Ensure contact belongs to the company
-      name: phoneNumber,
-      phone: phoneNumber,
+      name: normalizedPhone,
+      phone: normalizedPhone,
       email: null,
       avatarUrl: null,
-      identifier: phoneNumber,
-      identifierType: 'whatsapp_official',
+      identifier: normalizedPhone,
+      identifierType: 'whatsapp',
       source: 'whatsapp_official',
       notes: null
     };
@@ -1229,7 +1676,7 @@ async function findOrCreateConversation(connectionId: number, phoneNumber: strin
     };
 
     conversation = await storage.createConversation(conversationData);
-    
+
   }
 
   return conversation;
@@ -1273,14 +1720,14 @@ export async function sendMessage(connectionId: number, userId: number, companyI
     }
 
 
-    const cleanTo = to.replace(/[^\d]/g, '');
+    const normalizedPhone = normalizePhoneToE164(to);
 
 
     const response = await axios.post(
       `${WHATSAPP_GRAPH_URL}/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
-        to: cleanTo,
+        to: normalizedPhone,
         type: 'text',
         text: {
           body: message
@@ -1298,7 +1745,7 @@ export async function sendMessage(connectionId: number, userId: number, companyI
       const messageId = response.data.messages?.[0]?.id;
 
 
-      const conversation = await findOrCreateConversation(connectionId, cleanTo, companyId);
+      const conversation = await findOrCreateConversation(connectionId, normalizedPhone, companyId);
 
 
       const savedMessage = await storage.createMessage({
@@ -1415,22 +1862,33 @@ export async function sendInteractiveMessage(
   interactiveMessage: any
 ): Promise<{ messageId?: string; success: boolean }> {
   try {
+    
+
     const connection = await storage.getChannelConnection(connectionId);
     if (!connection) {
       throw new Error(`Connection ${connectionId} not found`);
     }
 
-    const config = (connection as any).config;
-    if (!config?.accessToken || !config?.phoneNumberId) {
-      throw new Error('WhatsApp Business API configuration missing');
+    const connectionData = connection.connectionData as any;
+    const accessToken = connectionData?.accessToken || connection.accessToken;
+    const phoneNumberId = connectionData?.phoneNumberId;
+
+    if (!accessToken) {
+      throw new Error('WhatsApp Business API access token is missing');
     }
 
-    const url = `${WHATSAPP_GRAPH_URL}/${WHATSAPP_API_VERSION}/${config.phoneNumberId}/messages`;
+    if (!phoneNumberId) {
+      throw new Error('WhatsApp Business API phone number ID is missing');
+    }
+
+    const url = `${WHATSAPP_GRAPH_URL}/${WHATSAPP_API_VERSION}/${phoneNumberId}/messages`;
+
+    
 
     
     const response = await axios.post(url, interactiveMessage, {
       headers: {
-        'Authorization': `Bearer ${config.accessToken}`,
+        'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
       },
       timeout: 30000
@@ -1466,6 +1924,7 @@ export default {
   sendBusinessMessage: sendWhatsAppBusinessMessage, // Keep the original for backward compatibility
   sendInteractiveMessage: sendInteractiveMessage, // Add interactive message support
   sendWhatsAppTestTemplate, // Add the test template function
+  sendTemplateMessage, // Add the campaign template message function
   sendMedia: sendWhatsAppBusinessMediaMessage,
   isActive: isBusinessConnectionActive,
   getActiveConnections: getActiveBusinessConnections,

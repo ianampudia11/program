@@ -78,16 +78,23 @@ export default function Sidebar() {
       queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
     });
 
+
     const unsubscribeWhatsAppStatus = onMessage('whatsappConnectionStatus', (data) => {
-      queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      if (data.status === 'connected' || data.status === 'disconnected') {
+        queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      }
     });
 
     const unsubscribeInstagramStatus = onMessage('instagramConnectionStatus', (data) => {
-      queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      if (data.status === 'connected' || data.status === 'disconnected') {
+        queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      }
     });
 
     const unsubscribeMessengerStatus = onMessage('messengerConnectionStatus', (data) => {
-      queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      if (data.status === 'connected' || data.status === 'disconnected') {
+        queryClient.invalidateQueries({ queryKey: ['/api/channel-connections', company?.id] });
+      }
     });
 
 
@@ -138,9 +145,9 @@ export default function Sidebar() {
 
   const { data: channelConnections = [] } = useQuery<any[]>({
     queryKey: ['/api/channel-connections', company?.id],
-    refetchOnWindowFocus: true,
-    refetchOnReconnect: true,
-    staleTime: 1000 * 60 * 2,
+    refetchOnWindowFocus: false, // Disable to prevent excessive refetching
+    refetchOnReconnect: false, // Disable to prevent excessive refetching
+    staleTime: 1000 * 60 * 5, // Increase stale time to 5 minutes
     enabled: !!company
   });
 
@@ -369,6 +376,17 @@ export default function Sidebar() {
             </Link>
           </PermissionGate>
 
+          <PermissionGate permissions={[PERMISSIONS.VIEW_TASKS, PERMISSIONS.MANAGE_TASKS]}>
+            <Link
+              href="/tasks"
+              className={`flex items-center px-2 py-2 rounded-lg ${location === '/tasks' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
+              style={location === '/tasks' ? companyStyle.activeItem : {}}
+            >
+              <i className="ri-task-line text-xl"></i>
+              <span className={`ml-3 ${isCollapsed ? 'hidden' : 'block'}`}>{t('nav.tasks', 'Tasks')}</span>
+            </Link>
+          </PermissionGate>
+
           <PermissionGate permissions={[PERMISSIONS.VIEW_CALENDAR, PERMISSIONS.MANAGE_CALENDAR]}>
             <Link
               href="/calendar"
@@ -401,6 +419,16 @@ export default function Sidebar() {
             </Link>
           </PermissionGate>
 
+          <PermissionGate permissions={[PERMISSIONS.MANAGE_TEMPLATES]}>
+            <Link
+              href="/templates"
+              className={`flex items-center px-2 py-2 rounded-lg ${location === '/templates' ? 'text-white' : 'text-gray-400 hover:text-white'}`}
+              style={location === '/templates' ? companyStyle.activeItem : {}}
+            >
+              <i className="ri-file-list-3-line text-xl"></i>
+              <span className={`ml-3 ${isCollapsed ? 'hidden' : 'block'}`}>{t('nav.templates', 'Templates')}</span>
+            </Link>
+          </PermissionGate>
 
           <PermissionGate permissions={[PERMISSIONS.VIEW_ANALYTICS, PERMISSIONS.VIEW_DETAILED_ANALYTICS]}>
             <Link
@@ -443,9 +471,18 @@ export default function Sidebar() {
                   icon = "ri-mail-line";
                   color = "#0078D4";
                   break;
+                case 'twilio_sms':
+                  icon = "ri-message-3-line";
+                  color = "#E4405F";
+                  break;
+                case 'webchat':
+                  icon = "ri-message-3-line";
+                  color = "#6366f1";
+                  break;
+                
                 default:
-                  icon = "ri-chat-1-line";
-                  color = "#333235";
+                  icon = "ri-message-3-line";
+                  color = "#a1f15bff";
               }
 
               const isActive = activeChannelId === connection.id;

@@ -152,6 +152,11 @@ export function requirePermission(permission: string) {
  */
 export async function rateLimitMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
+
+    if (req.path.startsWith('/api/webchat/')) {
+      return next();
+    }
+
     if (!req.apiKey || !req.apiKeyId) {
       return next();
     }

@@ -35,6 +35,189 @@ import { useGoogleCalendarAuth } from '@/hooks/useGoogleCalendarAuth';
 import { useZohoCalendarAuth } from '@/hooks/useZohoCalendarAuth';
 import { DocumentList } from "@/components/knowledge-base/DocumentList";
 import { RAGConfiguration } from "@/components/knowledge-base/RAGConfiguration";
+import { MCPServerConfig } from '@shared/types/mcp-types';
+
+interface MCPServerCardProps {
+  server: MCPServerConfig;
+  onUpdate: (updates: Partial<MCPServerConfig>) => void;
+  onRemove: () => void;
+  parseServerJson: (name: string, jsonString: string) => { config: Partial<MCPServerConfig>; error: string | null };
+  getServerJson: (server: MCPServerConfig) => string;
+}
+
+function MCPServerCard({ server, onUpdate, onRemove, parseServerJson, getServerJson }: MCPServerCardProps) {
+
+  const defaultExampleJson = `{
+  "mcpServers": {
+    "mercadopago-mcp-server": {
+      "url": "https://mcp.mercadopago.com/mcp",
+      "headers": {
+        "Authorization": "BEARER <ACCESS_TOKEN>"
+      }
+    }
+  }
+}`;
+
+
+  const isNewServer = server.transport === 'stdio' && 
+    server.command === 'npx' && 
+    JSON.stringify(server.args) === JSON.stringify(['-y', '@modelcontextprotocol/server-example']);
+
+  const [serverJson, setServerJson] = useState(() => {
+
+    if (isNewServer) {
+      return defaultExampleJson;
+    }
+    return getServerJson(server);
+  });
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  const [isFocused, setIsFocused] = useState(false);
+  const isSavingRef = React.useRef(false);
+
+
+  const serverConfigKey = `${server.transport}-${server.command}-${JSON.stringify(server.args)}-${JSON.stringify(server.env)}-${server.url}`;
+  useEffect(() => {
+
+    if (isSavingRef.current) {
+      return;
+    }
+    
+
+    if (isNewServer && serverJson === defaultExampleJson) {
+      return;
+    }
+    
+
+    if (!isFocused) {
+      const newJson = getServerJson(server);
+      const currentTrimmed = serverJson.trim();
+      const newTrimmed = newJson.trim();
+      
+
+      if (currentTrimmed !== newTrimmed) {
+
+
+        try {
+          const currentParsed = parseServerJson(server.name, serverJson);
+          
+
+          if (!currentParsed.error) {
+            const currentConfig = currentParsed.config;
+            
+
+            let serverConfigMatches = false;
+            
+            if (server.transport === 'stdio') {
+
+              const commandMatches = !currentConfig.command || currentConfig.command === server.command;
+              const argsMatches = !currentConfig.args || JSON.stringify(currentConfig.args) === JSON.stringify(server.args || []);
+              const envMatches = !currentConfig.env || JSON.stringify(currentConfig.env) === JSON.stringify(server.env || {});
+              serverConfigMatches = commandMatches && argsMatches && envMatches && (!currentConfig.url);
+            } else if (server.transport === 'http') {
+
+              const urlMatches = !currentConfig.url || currentConfig.url === server.url;
+              serverConfigMatches = urlMatches && (!currentConfig.command);
+            }
+            
+
+            if (serverConfigMatches) {
+              return;
+            }
+          }
+          
+
+          setServerJson(newJson);
+          setJsonError(null);
+        } catch {
+
+          setServerJson(newJson);
+          setJsonError(null);
+        }
+      }
+    }
+  }, [serverConfigKey, getServerJson, server, isFocused, serverJson, parseServerJson, isNewServer, defaultExampleJson]);
+
+  const handleBlur = () => {
+    setIsFocused(false);
+
+    const { config, error } = parseServerJson(server.name, serverJson);
+    if (error) {
+      setJsonError(error);
+      isSavingRef.current = false;
+    } else {
+      setJsonError(null);
+
+      isSavingRef.current = true;
+      onUpdate(config);
+
+      setTimeout(() => {
+        isSavingRef.current = false;
+      }, 300);
+    }
+  };
+
+  return (
+    <div className="border rounded-lg p-3 bg-white space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex-1 mr-2">
+          <Label className="text-[10px] font-medium text-gray-700">Server Name</Label>
+          <Input
+            value={server.name || ''}
+            onChange={(e) => onUpdate({ name: e.target.value })}
+            className="text-xs h-7 mt-1"
+            placeholder="e.g., Bright Data"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={server.enabled}
+            onCheckedChange={(enabled) => onUpdate({ enabled })}
+            className="scale-75"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onRemove}
+            className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+          >
+            <Trash2 className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+
+      <div>
+        <Label className="text-[10px] font-medium text-gray-700 mb-1 block">
+          Server Configuration (JSON)
+        </Label>
+        <Textarea
+          value={serverJson}
+          onChange={(e) => {
+            const value = e.target.value;
+            setServerJson(value);
+
+            const { error } = parseServerJson(server.name, value);
+            if (error) {
+              setJsonError(error);
+            } else {
+              setJsonError(null);
+            }
+          }}
+          onFocus={() => setIsFocused(true)}
+          onBlur={handleBlur}
+          className={`text-xs font-mono min-h-[120px] resize-y ${jsonError ? 'border-red-300' : ''}`}
+          placeholder={`{\n  "command": "npx",\n  "args": ["@brightdata/mcp"],\n  "env": {\n    "API_TOKEN": "your-token-here"\n  }\n}`}
+        />
+        {jsonError && (
+          <div className="flex items-start gap-2 mt-2 p-2 bg-red-50 border border-red-200 rounded text-[10px] text-red-800">
+            <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
+            <span>{jsonError}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 interface Provider {
   id: string;
@@ -289,6 +472,7 @@ interface AIAssistantNodeProps {
     apiKey?: string;
     credentialSource?: 'manual' | 'company' | 'system' | 'auto';
     prompt?: string;
+    language?: string;
     enableHistory?: boolean;
     historyLimit?: number;
     enableTextToSpeech?: boolean;
@@ -314,6 +498,8 @@ interface AIAssistantNodeProps {
       contextTemplate?: string;
     };
 
+    enableMCPServers?: boolean;
+    mcpServers?: MCPServerConfig[];
 
     pineconeApiKey?: string;
     pineconeEnvironment?: string;
@@ -342,6 +528,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
   const [apiKey, setApiKey] = useState(data.apiKey || '');
   const [credentialSource, setCredentialSource] = useState(data.credentialSource || 'auto');
   const [timezone, setTimezone] = useState(data.timezone || getBrowserTimezone());
+  const [language, setLanguage] = useState(data.language || 'en');
   const [prompt, setPrompt] = useState(data.prompt || t('flow_builder.ai_default_system_prompt', 'You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them.'));
   const [enableHistory, setEnableHistory] = useState(data.enableHistory !== undefined ? data.enableHistory : true);
   const [historyLimit, setHistoryLimit] = useState(data.historyLimit || 5);
@@ -363,7 +550,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
   const [elevenLabsStyle, setElevenLabsStyle] = useState(data.elevenLabsStyle ?? 0.0);
   const [elevenLabsUseSpeakerBoost, setElevenLabsUseSpeakerBoost] = useState(data.elevenLabsUseSpeakerBoost ?? true);
 
-  const [enableSessionTakeover, setEnableSessionTakeover] = useState(data.enableSessionTakeover || false);
+  const [enableSessionTakeover, setEnableSessionTakeover] = useState(data.enableSessionTakeover !== undefined ? data.enableSessionTakeover : true);
   const [stopKeyword, setStopKeyword] = useState(data.stopKeyword || 'stop');
   const [exitOutputHandle, setExitOutputHandle] = useState(data.exitOutputHandle || 'ai-stopped');
   const [enableTaskExecution, setEnableTaskExecution] = useState(data.enableTaskExecution || false);
@@ -386,11 +573,21 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
   const [pineconeIndexName, setPineconeIndexName] = useState((data as any).pineconeIndexName || '');
   const [showPineconeApiKey, setShowPineconeApiKey] = useState(false);
 
+  const [enableMCPServers, setEnableMCPServers] = useState((data as any).enableMCPServers || false);
+  const [mcpServers, setMcpServers] = useState<MCPServerConfig[]>(() => {
+    const servers = (data as any).mcpServers || [];
+
+    return servers.map((server: MCPServerConfig) => ({
+      ...server,
+      id: server.id || `mcp_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+    }));
+  });
+
 
   const [enableGoogleCalendar, setEnableGoogleCalendar] = useState((data as any).enableGoogleCalendar || false);
   const [calendarBusinessHours, setCalendarBusinessHours] = useState((data as any).calendarBusinessHours || { start: '09:00', end: '17:00' });
   const [calendarDefaultDuration, setCalendarDefaultDuration] = useState((data as any).calendarDefaultDuration || 60);
-
+  const [calendarBufferMinutes, setCalendarBufferMinutes] = useState((data as any).calendarBufferMinutes || 0);
   const [calendarTimeZone, setCalendarTimeZone] = useState((data as any).calendarTimeZone || getBrowserTimezone());
 
 
@@ -455,13 +652,36 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
+  const { data: availableLanguages } = useQuery({
+    queryKey: ['available-languages'],
+    queryFn: async () => {
+      try {
+        const response = await apiRequest('GET', '/api/languages');
+        const result = await response.json();
+        return result || [];
+      } catch (error) {
+        console.error('Failed to fetch languages:', error);
+        return [];
+      }
+    },
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  });
+
+
+
+  const isUpdatingRef = React.useRef(false);
 
   useEffect(() => {
-    if (data.provider !== undefined) setProvider(data.provider);
-    if (data.model !== undefined) setModel(data.model);
-    if (data.apiKey !== undefined) setApiKey(data.apiKey);
-    if (data.credentialSource !== undefined) setCredentialSource(data.credentialSource);
-    if (data.prompt !== undefined) setPrompt(data.prompt);
+
+    if (isUpdatingRef.current) return;
+
+    if (data.provider !== undefined && data.provider !== provider) setProvider(data.provider);
+    if (data.model !== undefined && data.model !== model) setModel(data.model);
+    if (data.apiKey !== undefined && data.apiKey !== apiKey) setApiKey(data.apiKey);
+    if (data.credentialSource !== undefined && data.credentialSource !== credentialSource) setCredentialSource(data.credentialSource);
+    if (data.timezone !== undefined && data.timezone !== timezone) setTimezone(data.timezone);
+    if (data.language !== undefined && data.language !== language) setLanguage(data.language);
+    if (data.prompt !== undefined && data.prompt !== prompt) setPrompt(data.prompt);
     if (data.enableHistory !== undefined) setEnableHistory(data.enableHistory);
     if (data.historyLimit !== undefined) setHistoryLimit(data.historyLimit);
     if (data.enableTextToSpeech !== undefined) setEnableTextToSpeech(data.enableTextToSpeech);
@@ -477,7 +697,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     if ((data as any).enableGoogleCalendar !== undefined) setEnableGoogleCalendar((data as any).enableGoogleCalendar);
     if ((data as any).calendarBusinessHours !== undefined) setCalendarBusinessHours((data as any).calendarBusinessHours);
     if ((data as any).calendarDefaultDuration !== undefined) setCalendarDefaultDuration((data as any).calendarDefaultDuration);
-
+    if ((data as any).calendarBufferMinutes !== undefined) setCalendarBufferMinutes((data as any).calendarBufferMinutes);
     if ((data as any).calendarTimeZone !== undefined) setCalendarTimeZone((data as any).calendarTimeZone);
 
 
@@ -496,7 +716,33 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     if ((data as any).pineconeApiKey !== undefined) setPineconeApiKey((data as any).pineconeApiKey);
     if ((data as any).pineconeEnvironment !== undefined) setPineconeEnvironment((data as any).pineconeEnvironment);
     if ((data as any).pineconeIndexName !== undefined) setPineconeIndexName((data as any).pineconeIndexName);
+    if ((data as any).enableMCPServers !== undefined) setEnableMCPServers((data as any).enableMCPServers);
+    if ((data as any).mcpServers !== undefined) {
+      const servers = (data as any).mcpServers || [];
+
+      const serversWithIds = servers.map((server: MCPServerConfig) => ({
+        ...server,
+        id: server.id || `mcp_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+      }));
+      setMcpServers(serversWithIds);
+    }
   }, [data]);
+
+
+  useEffect(() => {
+    const currentDefaultPrompt = t('flow_builder.ai_default_system_prompt', 'You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them.');
+
+    const enDefault = 'You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them.';
+    const esDefault = 'Eres un asistente útil. Responde las preguntas de los usuarios de manera concisa y precisa. Solo realiza acciones específicas cuando el usuario las solicite explícitamente.';
+    const arDefault = 'أنت مساعد مفيد. أجب على أسئلة المستخدمين بإيجاز ودقة. قم فقط بإجراءات محددة عندما يطلبها المستخدم صراحة.';
+    
+    if (prompt === enDefault || prompt === esDefault || prompt === arDefault || prompt === currentDefaultPrompt) {
+      const newDefaultPrompt = t('flow_builder.ai_default_system_prompt', 'You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them.');
+      if (newDefaultPrompt !== prompt) {
+        setPrompt(newDefaultPrompt);
+      }
+    }
+  }, [language, t]);
 
   const TTS_PROVIDERS = [
     { id: 'openai', name: t('flow_builder.ai_tts_openai_name', 'OpenAI'), description: t('flow_builder.ai_tts_openai_description', 'OpenAI TTS with Whisper STT') },
@@ -629,6 +875,114 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     });
   }, []);
 
+  const parseServerJson = useCallback((name: string, jsonString: string): { config: Partial<MCPServerConfig>; error: string | null } => {
+    try {
+      const parsed = JSON.parse(jsonString);
+      
+      if (typeof parsed !== 'object' || parsed === null) {
+        return { config: {}, error: 'JSON must be an object' };
+      }
+
+      let configObj = parsed;
+      let extractedName: string | undefined = undefined;
+
+
+      if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+
+        const serverNames = Object.keys(parsed.mcpServers);
+        if (serverNames.length > 0) {
+          const firstServerName = serverNames[0];
+          configObj = parsed.mcpServers[firstServerName];
+          extractedName = firstServerName;
+        }
+      }
+
+      const config: Partial<MCPServerConfig> = {};
+
+
+      if (extractedName && extractedName !== name) {
+        config.name = extractedName;
+      }
+
+
+      if (configObj.url) {
+        config.transport = 'http';
+        config.url = configObj.url;
+      } else if (configObj.command) {
+        config.transport = 'stdio';
+        config.command = configObj.command;
+        if (configObj.args) {
+          config.args = Array.isArray(configObj.args) ? configObj.args : [];
+        }
+        if (configObj.env) {
+          config.env = configObj.env;
+        }
+      } else {
+        return { config: {}, error: 'Must have either "command" (stdio) or "url" (http)' };
+      }
+
+      return { config, error: null };
+    } catch (error: any) {
+      return { config: {}, error: `Invalid JSON: ${error.message}` };
+    }
+  }, []);
+
+  const addMCPServer = useCallback(() => {
+    const timestamp = Date.now();
+    const randomSuffix = Math.floor(Math.random() * 10000);
+    const serverId = `mcp_${timestamp}_${randomSuffix}`;
+
+    const newServer: MCPServerConfig = {
+      id: serverId,
+      name: `MCP Server ${mcpServers.length + 1}`,
+      enabled: true,
+      transport: 'stdio',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-example'],
+      env: {},
+      timeout: 30000
+    };
+
+    setMcpServers(prevServers => [...prevServers, newServer]);
+  }, [mcpServers.length]);
+
+  const updateMCPServer = useCallback((serverId: string, updates: Partial<MCPServerConfig>) => {
+    setMcpServers(prevServers => {
+      return prevServers.map(server =>
+        server.id === serverId ? { ...server, ...updates } : server
+      );
+    });
+  }, []);
+
+  const updateServerJson = useCallback((serverId: string, jsonString: string) => {
+    const server = mcpServers.find(s => s.id === serverId);
+    if (!server) return;
+
+    const { config, error } = parseServerJson(server.name, jsonString);
+    if (error) {
+
+      return;
+    }
+
+    updateMCPServer(serverId, config);
+  }, [mcpServers, parseServerJson, updateMCPServer]);
+
+  const getServerJson = useCallback((server: MCPServerConfig): string => {
+    const config: any = {};
+    if (server.transport === 'stdio') {
+      if (server.command) config.command = server.command;
+      if (server.args && server.args.length > 0) config.args = server.args;
+      if (server.env && Object.keys(server.env).length > 0) config.env = server.env;
+    } else if (server.transport === 'http') {
+      if (server.url) config.url = server.url;
+    }
+    return JSON.stringify(config, null, 2);
+  }, []);
+
+  const removeMCPServer = useCallback((serverId: string) => {
+    setMcpServers(prevServers => prevServers.filter(server => server.id !== serverId));
+  }, []);
+
 
   const getCalendarFunctions = useCallback(() => {
     if (!enableGoogleCalendar || !isGoogleCalendarConnected) return [];
@@ -660,14 +1014,39 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                 type: 'string',
                 description: t('flow_builder.ai_function_param_end_datetime', 'End date and time in ISO format (YYYY-MM-DDTHH:MM:SS)')
               },
+              time_zone: {
+                type: 'string',
+                description: 'Timezone for the event (e.g., America/New_York, UTC). Defaults to node configuration timezone.'
+              },
+              attendees: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    email: { type: 'string', description: 'Attendee email address' },
+                    displayName: { type: 'string', description: 'Attendee display name (optional)' }
+                  },
+                  required: ['email']
+                },
+                description: 'Array of attendee objects with email and optional displayName (optional)'
+              },
               attendee_emails: {
                 type: 'array',
                 items: { type: 'string' },
-                description: t('flow_builder.ai_function_param_attendee_emails', 'Email addresses of attendees (optional)')
+                description: t('flow_builder.ai_function_param_attendee_emails', 'Email addresses of attendees (optional, legacy format)')
               },
               location: {
                 type: 'string',
                 description: t('flow_builder.ai_function_param_location', 'Location of the appointment (optional)')
+              },
+              send_updates: {
+                type: 'boolean',
+                description: 'Whether to send email notifications to attendees. Defaults to true.',
+                default: true
+              },
+              organizer_email: {
+                type: 'string',
+                description: 'Email of the event organizer (optional, defaults to calendar owner)'
               }
             },
             required: ['title', 'start_datetime', 'end_datetime']
@@ -772,9 +1151,30 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                 type: 'string',
                 description: 'New end date and time in ISO format (optional)'
               },
+              time_zone: {
+                type: 'string',
+                description: 'Timezone for the event (e.g., America/New_York, UTC). Defaults to node configuration timezone.'
+              },
               location: {
                 type: 'string',
                 description: 'New location of the appointment (optional)'
+              },
+              attendees: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    email: { type: 'string', description: 'Attendee email address' },
+                    displayName: { type: 'string', description: 'Attendee display name (optional)' }
+                  },
+                  required: ['email']
+                },
+                description: 'Array of attendee objects with email and optional displayName (optional)'
+              },
+              send_updates: {
+                type: 'boolean',
+                description: 'Whether to send email notifications to attendees about the update. Defaults to true.',
+                default: true
               }
             },
             required: ['event_id']
@@ -1051,6 +1451,8 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
   const availableModels = currentProvider?.models || [];
 
   const updateNodeData = useCallback((updates: any) => {
+
+    isUpdatingRef.current = true;
     setNodes((nodes) =>
       nodes.map((node) => {
         if (node.id === id) {
@@ -1065,6 +1467,10 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
         return node;
       })
     );
+
+    setTimeout(() => {
+      isUpdatingRef.current = false;
+    }, 100);
   }, [id, setNodes]);
 
 
@@ -1097,43 +1503,58 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
   }, [updateNodeData, getZohoCalendarFunctions]);
 
 
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      updateNodeData({ mcpServers });
+    }, 50); // Small debounce to batch rapid changes
+
+    return () => clearTimeout(timeoutId);
+  }, [updateNodeData, mcpServers]);
+
 
 
   useEffect(() => {
-    updateNodeData({
-      provider,
-      model,
-      apiKey,
-      credentialSource,
-      timezone,
-      prompt,
-      enableHistory,
-      historyLimit,
-      enableTextToSpeech,
-      ttsProvider,
-      ttsVoice,
-      voiceResponseMode,
-      maxAudioDuration,
-      enableSessionTakeover,
-      stopKeyword,
-      exitOutputHandle,
-      enableTaskExecution,
-      enableGoogleCalendar,
-      calendarBusinessHours,
-      calendarDefaultDuration,
 
-      calendarTimeZone,
-      calendarFunctions: getCalendarFunctions(),
+      if (isUpdatingRef.current) return;
+      
+      updateNodeData({
+        provider,
+        model,
+        apiKey,
+        credentialSource,
+        timezone,
+
+        language: language,
+        prompt,
+        enableHistory,
+        historyLimit,
+        enableTextToSpeech,
+        ttsProvider,
+        ttsVoice,
+        voiceResponseMode,
+        maxAudioDuration,
+        enableSessionTakeover,
+        stopKeyword,
+        exitOutputHandle,
+        enableTaskExecution,
+        enableGoogleCalendar,
+        calendarBusinessHours,
+        calendarDefaultDuration,
+        calendarBufferMinutes,
+        calendarTimeZone,
+        calendarFunctions: getCalendarFunctions(),
 
 
-      enableZohoCalendar,
-      zohoCalendarBusinessHours,
-      zohoCalendarDefaultDuration,
-      zohoCalendarTimeZone,
+        enableZohoCalendar,
+        zohoCalendarBusinessHours,
+        zohoCalendarDefaultDuration,
+        zohoCalendarTimeZone,
       zohoCalendarFunctions: getZohoCalendarFunctions(),
 
       knowledgeBaseEnabled,
       knowledgeBaseConfig,
+
+      enableMCPServers,
 
       pineconeApiKey,
       pineconeEnvironment,
@@ -1155,6 +1576,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     apiKey,
     credentialSource,
     timezone,
+
     prompt,
     enableHistory,
     historyLimit,
@@ -1170,6 +1592,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     enableGoogleCalendar,
     calendarBusinessHours,
     calendarDefaultDuration,
+    calendarBufferMinutes,
     calendarTimeZone,
     getCalendarFunctions,
     enableZohoCalendar,
@@ -1179,6 +1602,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
     getZohoCalendarFunctions,
     knowledgeBaseEnabled,
     knowledgeBaseConfig,
+    enableMCPServers,
     pineconeApiKey,
     pineconeEnvironment,
     pineconeIndexName,
@@ -1541,6 +1965,48 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                     </TooltipProvider>
                   </div>
 
+                  {/* Language Selection */}
+                  <div>
+                    <Label className="text-[10px] font-medium text-gray-700">
+                      {t('flow_builder.ai_language_label', 'Response Language')}
+                    </Label>
+                    <Select 
+                      value={language} 
+                      onValueChange={(value) => {
+                        isUpdatingRef.current = true;
+                        setLanguage(value);
+
+                        updateNodeData({ language: value });
+                      }}
+                    >
+                      <SelectTrigger className="text-xs h-7 mt-1">
+                        <SelectValue placeholder={t('flow_builder.ai_language_placeholder', 'Select language...')} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableLanguages && availableLanguages.length > 0 ? (
+                          availableLanguages
+                            .filter((lang: any) => lang.isActive !== false)
+                            .map((lang: any) => (
+                              <SelectItem key={lang.code} value={lang.code}>
+                                <div className="flex items-center gap-2">
+                                  {lang.flagIcon && <span>{lang.flagIcon}</span>}
+                                  <span>{lang.name}</span>
+                                  {lang.nativeName !== lang.name && (
+                                    <span className="text-muted-foreground">({lang.nativeName})</span>
+                                  )}
+                                </div>
+                              </SelectItem>
+                            ))
+                        ) : (
+                          <SelectItem value="en">English</SelectItem>
+                        )}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[9px] text-muted-foreground mt-1">
+                      {t('flow_builder.ai_language_description', 'Select the language the AI assistant should use for responses')}
+                    </p>
+                  </div>
+
                   <div>
                     <Label className="text-[10px] font-medium text-gray-700">{t('flow_builder.ai_system_prompt', 'System Prompt')}</Label>
                     <Textarea
@@ -1603,6 +2069,55 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
 
 
                 </div>
+              </div>
+
+
+
+                {/* Session Takeover Section */}
+              <div className="border rounded-lg p-3 bg-gradient-to-r from-orange-50 to-red-50">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                    <LogOut className="h-4 w-4" />
+                    {t('flow_builder.ai_session_takeover', 'Session Takeover')}
+                  </h3>
+                  <Switch
+                    checked={enableSessionTakeover}
+                    onCheckedChange={setEnableSessionTakeover}
+                  />
+                </div>
+
+                {enableSessionTakeover && (
+                  <div className="space-y-3">
+                    <div>
+                      <Label className="text-xs font-medium text-gray-700">
+                        {t('flow_builder.ai_stop_keyword', 'Stop Keyword')}
+                      </Label>
+                      <Input
+                        placeholder={t('flow_builder.ai_stop_keyword_placeholder', 'e.g., stop, end, agent')}
+                        value={stopKeyword}
+                        onChange={(e) => setStopKeyword(e.target.value)}
+                        className="text-xs h-7 mt-1"
+                      />
+                      <p className="text-[9px] text-muted-foreground mt-1">
+                        {t('flow_builder.ai_stop_keyword_help', 'User can type this keyword to end the AI session')}
+                      </p>
+                    </div>
+
+
+
+                    <div className="bg-blue-50 border border-blue-200 rounded-md p-2">
+                      <p className="text-[10px] text-blue-700">
+                        {t('flow_builder.ai_session_takeover_tip', '💡 Tip: When enabled, the AI will handle all subsequent messages until the stop keyword is received or the session is manually ended.')}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {!enableSessionTakeover && (
+                  <p className="text-[10px] text-muted-foreground">
+                    {t('flow_builder.ai_session_takeover_disabled_help', 'Enable session takeover to allow AI to handle continuous conversation without restarting the flow')}
+                  </p>
+                )}
               </div>
 
               {/* Voice Processing Section - Available for OpenAI and other providers */}
@@ -1851,6 +2366,10 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                 </div>
               )}
 
+
+
+
+
               {/* Audio Processing Limits Section */}
               {provider === 'openai' && enableTextToSpeech && (
                 <div className="border rounded-lg p-3 bg-gradient-to-r from-orange-50 to-red-50">
@@ -1896,6 +2415,8 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                   </div>
                 </div>
               )}
+
+            
 
               {/* Task Execution Section */}
               <div className="border rounded-lg p-3 bg-gradient-to-r from-indigo-50 to-purple-50">
@@ -2072,7 +2593,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                         <div className="text-xs text-muted-foreground">
                           {t('flow_builder.ai_calendar_features_available', 'The AI can now: book appointments, check availability, list events, update events, and cancel events.')}
                           <br />
-                          <span className="text-blue-600 font-medium">{t('flow_builder.ai_calendar_system_prompt_note', 'Note: Calendar behavior is controlled by the main system prompt above.')}</span>
+                          <span className="text-blue-600 font-medium">{t('flow_builder.ai_calendar_system_prompt_note', 'Core calendar behavior is enforced when enabled. The prompt customizes tone and extra guidance.')}</span>
                         </div>
                       </div>
                     )}
@@ -2115,6 +2636,21 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                             />
                           </div>
                           <div>
+                            <Label className="text-xs font-medium">{t('flow_builder.ai_buffer_minutes', 'Buffer between meetings (minutes)')}</Label>
+                            <Input
+                              type="number"
+                              min="0"
+                              max="120"
+                              step="5"
+                              value={calendarBufferMinutes}
+                              onChange={(e) => setCalendarBufferMinutes(parseInt(e.target.value) || 0)}
+                              className="text-xs h-7"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3">
+                          <div>
                             <Label className="text-xs font-medium">{t('flow_builder.ai_timezone', 'Timezone')}</Label>
                             <TimezoneSelector
                               value={calendarTimeZone}
@@ -2131,7 +2667,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
 
                 {!enableGoogleCalendar && (
                   <p className="text-[10px] text-muted-foreground">
-                    {t('flow_builder.ai_google_calendar_disabled_help', 'Enable Google Calendar integration to allow AI to manage appointments and check availability')}
+                    {t('flow_builder.ai_google_calendar_disabled_help', 'Core calendar behavior is enforced when enabled. The prompt customizes tone and extra guidance.')}
                   </p>
                 )}
               </div>
@@ -2234,7 +2770,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                         <div className="text-xs text-muted-foreground">
                           {t('flow_builder.ai_zoho_calendar_features_available', 'The AI can now: book appointments, check availability, list events, update events, and cancel events in Zoho Calendar.')}
                           <br />
-                          <span className="text-blue-600 font-medium">{t('flow_builder.ai_calendar_system_prompt_note', 'Note: Calendar behavior is controlled by the main system prompt above.')}</span>
+                          <span className="text-blue-600 font-medium">{t('flow_builder.ai_calendar_system_prompt_note', 'Core calendar behavior is enforced when enabled. The prompt customizes tone and extra guidance.')}</span>
                         </div>
                       </div>
                     )}
@@ -2293,7 +2829,7 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
 
                 {!enableZohoCalendar && (
                   <p className="text-[10px] text-muted-foreground">
-                    {t('flow_builder.ai_zoho_calendar_disabled_help', 'Enable Zoho Calendar integration to allow AI to manage appointments and check availability')}
+                    {t('flow_builder.ai_zoho_calendar_disabled_help', 'Core calendar behavior is enforced when enabled. The prompt customizes tone and extra guidance.')}
                   </p>
                 )}
               </div>
@@ -2429,6 +2965,88 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
                 )}
               </div>
 
+              {/* MCP Servers Configuration */}
+              <div className="border rounded-lg p-3 bg-gradient-to-r from-purple-50 to-pink-50">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                    <Settings className="h-4 w-4" />
+                    {t('flow_builder.ai_mcp_servers', 'MCP Servers')}
+                  </h3>
+                  <div className="flex items-center gap-2">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 text-gray-400 cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <div className="max-w-xs">
+                            <p className="text-xs">
+                              MCP (Model Context Protocol) servers provide additional tools and capabilities to the AI assistant.
+                              <br />
+                              <a href="https://mcpservers.org" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">
+                                Learn more
+                              </a>
+                            </p>
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <div className="flex items-center space-x-2">
+                      <Switch
+                        checked={enableMCPServers}
+                        onCheckedChange={setEnableMCPServers}
+                        className="scale-75"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {enableMCPServers ? (
+                  <div className="space-y-3">
+                    <div className="space-y-3">
+                      {mcpServers.map((server) => (
+                        <MCPServerCard
+                          key={server.id}
+                          server={server}
+                          onUpdate={(updates) => updateMCPServer(server.id, updates)}
+                          onRemove={() => removeMCPServer(server.id)}
+                          parseServerJson={parseServerJson}
+                          getServerJson={getServerJson}
+                        />
+                      ))}
+                    </div>
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={addMCPServer}
+                      className="w-full text-xs h-7"
+                    >
+                      <Plus className="h-3 w-3 mr-1" />
+                      Add another MCP Server
+                    </Button>
+
+                    {mcpServers.length === 0 && (
+                      <div className="text-center p-4 bg-white rounded-lg border border-purple-200">
+                        <p className="text-[10px] text-muted-foreground mb-2">
+                          No MCP servers configured. Click "Add another MCP Server" to get started.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[10px] text-muted-foreground">
+                      {t('flow_builder.ai_mcp_servers_disabled_help', 'Enable MCP servers to extend AI capabilities with external tools and integrations')}
+                    </p>
+                    <p className="text-[10px] text-purple-600">
+                      💡 {t('flow_builder.ai_mcp_servers_setup_hint', 'Paste your MCP server configuration JSON to get started')}
+                    </p>
+                  </div>
+                )}
+              </div>
+
             </>
           )}
         </div>
@@ -2493,6 +3111,50 @@ export function AIAssistantNode({ id, data, isConnectable }: AIAssistantNodeProp
           </div>
         );
       })}
+
+      {/* Session Takeover Exit Handle */}
+      {enableSessionTakeover && (
+        <div
+          className="absolute right-0 flex items-center pointer-events-none"
+          style={{
+            top: enableTaskExecution && tasks.filter(t => t.enabled).length > 0
+              ? `${30 + (tasks.filter(t => t.enabled).length * Math.min(15, 60 / Math.max(tasks.filter(t => t.enabled).length + 1, 1)))}%`
+              : '70%'
+          }}
+        >
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="pointer-events-auto">
+                  <Handle
+                    type="source"
+                    position={Position.Right}
+                    id={exitOutputHandle}
+                    style={{...standardHandleStyle, backgroundColor: '#f97316'}}
+                    isConnectable={isConnectable}
+                    key={`handle-${exitOutputHandle}-${handleKey}`}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onMouseMove={(e) => {
+                      e.stopPropagation();
+                    }}
+                  />
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="left">
+                <div className="max-w-[250px]">
+                  <p className="text-xs font-medium text-orange-600">Session Exit</p>
+                  <p className="text-xs text-muted-foreground mt-1">Triggered when AI session ends</p>
+                  <p className="text-[10px] text-muted-foreground mt-1 italic">
+                    Stop keyword: "{stopKeyword || 'stop'}"
+                  </p>
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      )}
     </div>
   );
 }

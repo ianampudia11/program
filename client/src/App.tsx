@@ -11,6 +11,7 @@ import Inbox from "@/pages/Inbox";
 import Flows from "@/pages/flows";
 import FlowBuilder from "@/pages/flow-builder";
 import Contacts from "@/pages/contacts";
+import Tasks from "@/pages/tasks";
 import Calendar from "@/pages/calendar";
 import Analytics from "@/pages/analytics";
 import Settings from "@/pages/settings";
@@ -38,6 +39,7 @@ import { ConversationProvider } from "./context/ConversationContext";
 import { AuthProvider } from "@/hooks/use-auth";
 import { TranslationProvider } from "@/hooks/use-translation";
 import { BrandingProvider } from "@/contexts/branding-context";
+import { CurrencyProvider } from "@/contexts/currency-context";
 import { SubdomainProvider } from "@/contexts/subdomain-context";
 import { PlanUpdatesProvider } from "@/components/PlanUpdatesProvider";
 import { ActiveChannelProvider } from "@/contexts/ActiveChannelContext";
@@ -48,10 +50,12 @@ import {
   AnalyticsRoute,
   FlowsRoute,
   ContactsRoute,
+  TasksRoute,
   PipelineRoute,
   CalendarRoute,
   CampaignsRoute,
-  PagesRoute
+  PagesRoute,
+  TemplatesRoute
 } from "@/components/auth/ProtectedRoute";
 import AccessDenied from "@/pages/AccessDenied";
 
@@ -59,10 +63,12 @@ import { Loader2 } from "lucide-react";
 import PagesPage from "./pages/pages";
 import LandingPage from "./pages/landing";
 import ProtectedLandingPage from "./components/ProtectedLandingPage";
+import Templates from "./pages/templates";
 import RootRedirect from "./components/RootRedirect";
 import { CustomScriptsProvider } from "@/components/CustomScriptsProvider";
 import { ManualRenewalProvider } from "@/contexts/manual-renewal-context";
 import { initializeGoogleTranslateCompatibility } from "@/utils/google-translate-compatibility";
+import { initializeEmbedContext, preserveEmbedParam } from "@/utils/embed-context";
 
 const LazyLoadingFallback = () => (
   <div className="flex items-center justify-center min-h-screen">
@@ -100,14 +106,17 @@ function Router() {
           </ContactsRoute>
         </Route>
 
+        <Route path="/tasks">
+          <TasksRoute>
+            <Tasks />
+          </TasksRoute>
+        </Route>
+
         <Route path="/pipeline">
           <PipelineRoute>
             <PipelineView />
           </PipelineRoute>
         </Route>
-
-        <ProtectedRoute path="/debug-pipeline" component={React.lazy(() => import("@/pages/debug-pipeline"))} />
-        <ProtectedRoute path="/test-plan-expiration" component={React.lazy(() => import("@/pages/test-plan-expiration"))} />
 
         <Route path="/calendar">
           <CalendarRoute>
@@ -137,6 +146,12 @@ function Router() {
           <CampaignsRoute>
             <CampaignsPage />
           </CampaignsRoute>
+        </Route>
+
+        <Route path="/templates">
+          <TemplatesRoute>
+            <Templates />
+          </TemplatesRoute>
         </Route>
 
         <Route path="/analytics">
@@ -228,23 +243,7 @@ function App() {
     initializeGoogleTranslateCompatibility();
 
 
-    const checkEmbedContext = () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const isInIframe = window !== window.top;
-      const hasEmbedParam = urlParams.get('embed') === 'true';
-      const isEmbeddedContext = isInIframe || hasEmbedParam || Boolean(window.isEmbedded);
-
-
-      if (isEmbeddedContext) {
-        document.body.classList.add('embedded-context');
-
-        if (window.parent !== window) {
-          window.parent.postMessage({ type: 'app-loaded' }, '*');
-        }
-      }
-    };
-
-    checkEmbedContext();
+    initializeEmbedContext();
 
     setTimeout(() => {
       setIsInitializing(false);
@@ -266,25 +265,27 @@ function App() {
         <SubdomainProvider>
           <AuthProvider>
             <BrandingProvider>
-              <TranslationProvider>
-                <ActiveChannelProvider>
-                  <ConversationProvider>
-                    <PlanUpdatesProvider>
-                      <ManualRenewalProvider>
-                        <TooltipProvider>
-                          <SubscriptionGuard>
-                          <div className="font-poppins">
-                            <Toaster />
-                            <FacebookSDKLoader />
-                            <Router />
-                          </div>
-                        </SubscriptionGuard>
-                      </TooltipProvider>
-                    </ManualRenewalProvider>
-                  </PlanUpdatesProvider>
-                </ConversationProvider>
-              </ActiveChannelProvider>
-            </TranslationProvider>
+              <CurrencyProvider>
+                <TranslationProvider>
+                  <ActiveChannelProvider>
+                    <ConversationProvider>
+                      <PlanUpdatesProvider>
+                        <ManualRenewalProvider>
+                          <TooltipProvider>
+                            <SubscriptionGuard>
+                            <div className="font-poppins">
+                              <Toaster />
+                              <FacebookSDKLoader />
+                              <Router />
+                            </div>
+                          </SubscriptionGuard>
+                        </TooltipProvider>
+                      </ManualRenewalProvider>
+                    </PlanUpdatesProvider>
+                  </ConversationProvider>
+                </ActiveChannelProvider>
+              </TranslationProvider>
+              </CurrencyProvider>
             </BrandingProvider>
           </AuthProvider>
         </SubdomainProvider>

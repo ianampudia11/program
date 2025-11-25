@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -30,7 +30,7 @@ interface Props {
 }
 
 export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
-  const { toast } = useToast();
+  const { toast} = useToast();
   const [loading, setLoading] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
   const [showQRModal, setShowQRModal] = useState(false);
@@ -38,6 +38,13 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
   const [qrLoading, setQrLoading] = useState(false);
   const [authStatus, setAuthStatus] = useState<'pending' | 'checking' | 'authenticated' | 'failed'>('pending');
   const [connectionId, setConnectionId] = useState<number | null>(null);
+  
+
+  const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isPollingRef = useRef(false);
+  const qrCacheRef = useRef<Map<string, string>>(new Map());
+  const lastQRGenerationRef = useRef<number>(0);
+  const QR_GENERATION_COOLDOWN = 5000; // 5 seconds between generations
   
   const [formData, setFormData] = useState<TelegramFormData>({
     accountName: '',
@@ -47,6 +54,26 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
     webhookUrl: `${window.location.origin}/api/webhooks/telegram`,
     verifyToken: ''
   });
+
+
+  useEffect(() => {
+    return () => {
+      if (pollingTimeoutRef.current) {
+        clearTimeout(pollingTimeoutRef.current);
+        pollingTimeoutRef.current = null;
+      }
+      isPollingRef.current = false;
+    };
+  }, []);
+
+
+  useEffect(() => {
+    if (!isOpen && pollingTimeoutRef.current) {
+      clearTimeout(pollingTimeoutRef.current);
+      pollingTimeoutRef.current = null;
+      isPollingRef.current = false;
+    }
+  }, [isOpen]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -118,6 +145,36 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
   };
 
   const generateQRCode = async (tempConnectionId: number) => {
+
+    const now = Date.now();
+    const timeSinceLastGeneration = now - lastQRGenerationRef.current;
+    
+    if (timeSinceLastGeneration < QR_GENERATION_COOLDOWN) {
+      const remainingTime = Math.ceil((QR_GENERATION_COOLDOWN - timeSinceLastGeneration) / 1000);
+      toast({
+        title: "Please Wait",
+        description: `You can generate a new QR code in ${remainingTime} seconds.`,
+        variant: "default"
+      });
+      return;
+    }
+    
+
+    setShowQRModal(true);
+    setConnectionId(tempConnectionId);
+    
+
+    const cacheKey = `telegram-qr-${tempConnectionId}`;
+    const cached = qrCacheRef.current.get(cacheKey);
+    
+    if (cached) {
+      setQrCodeDataUrl(cached);
+      setAuthStatus('checking');
+      pollAuthStatus(tempConnectionId);
+      return;
+    }
+
+    lastQRGenerationRef.current = now;
     setQrLoading(true);
     try {
       const response = await fetch('/api/telegram/generate-qr', {
@@ -132,6 +189,8 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
 
       if (response.ok) {
         const data = await response.json();
+        
+
         const qrDataUrl = await QRCode.toDataURL(data.qrCode, {
           width: 256,
           margin: 2,
@@ -140,10 +199,14 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
             light: '#FFFFFF'
           }
         });
+        
+
+        qrCacheRef.current.set(cacheKey, qrDataUrl);
+        setTimeout(() => qrCacheRef.current.delete(cacheKey), 30000);
+        
         setQrCodeDataUrl(qrDataUrl);
         setAuthStatus('checking');
         
-
         pollAuthStatus(tempConnectionId);
       } else {
         const errorData = await response.json();
@@ -162,15 +225,34 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
   };
 
   const pollAuthStatus = async (tempConnectionId: number) => {
-    const maxAttempts = 60; // 5 minutes with 5-second intervals
+    const maxAttempts = 40; // Reduced from 60 due to exponential backoff
     let attempts = 0;
+    let delay = 5000; // Start at 5 seconds
 
     const checkStatus = async () => {
+
+      if (document.hidden) {
+        if (pollingTimeoutRef.current) {
+          clearTimeout(pollingTimeoutRef.current);
+        }
+        pollingTimeoutRef.current = setTimeout(checkStatus, delay);
+        return;
+      }
+
+
+      if (!isPollingRef.current) {
+        return;
+      }
+
       try {
         const response = await fetch(`/api/telegram/check-auth/${tempConnectionId}`);
         if (response.ok) {
           const data = await response.json();
           if (data.authenticated) {
+            isPollingRef.current = false;
+            if (pollingTimeoutRef.current) {
+              clearTimeout(pollingTimeoutRef.current);
+            }
             setAuthStatus('authenticated');
             toast({
               title: "Authentication Successful",
@@ -186,8 +268,15 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
 
         attempts++;
         if (attempts < maxAttempts) {
-          setTimeout(checkStatus, 5000); // Check every 5 seconds
+
+          delay = Math.min(delay * 1.2, 20000);
+          
+          if (pollingTimeoutRef.current) {
+            clearTimeout(pollingTimeoutRef.current);
+          }
+          pollingTimeoutRef.current = setTimeout(checkStatus, delay);
         } else {
+          isPollingRef.current = false;
           setAuthStatus('failed');
           toast({
             title: "Authentication Timeout",
@@ -198,13 +287,21 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
       } catch (error) {
         attempts++;
         if (attempts < maxAttempts) {
-          setTimeout(checkStatus, 5000);
+
+          delay = Math.min(delay * 1.5, 20000);
+          
+          if (pollingTimeoutRef.current) {
+            clearTimeout(pollingTimeoutRef.current);
+          }
+          pollingTimeoutRef.current = setTimeout(checkStatus, delay);
         } else {
+          isPollingRef.current = false;
           setAuthStatus('failed');
         }
       }
     };
 
+    isPollingRef.current = true;
     checkStatus();
   };
 
@@ -282,6 +379,13 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
   };
 
   const handleClose = () => {
+
+    if (pollingTimeoutRef.current) {
+      clearTimeout(pollingTimeoutRef.current);
+      pollingTimeoutRef.current = null;
+    }
+    isPollingRef.current = false;
+    
     setFormData({
       accountName: '',
       botToken: '',
@@ -296,6 +400,20 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
     setConnectionId(null);
     onClose();
   };
+
+
+  const memoizedQRImage = useMemo(() => {
+    if (!qrCodeDataUrl) return null;
+    
+    return (
+      <img
+        src={qrCodeDataUrl}
+        alt="Telegram QR Code"
+        className="border rounded-lg"
+        loading="eager"
+      />
+    );
+  }, [qrCodeDataUrl]);
 
   return (
     <>
@@ -481,11 +599,7 @@ export function TelegramConnectionForm({ isOpen, onClose, onSuccess }: Props) {
               </div>
             ) : qrCodeDataUrl ? (
               <div className="flex flex-col items-center space-y-2">
-                <img
-                  src={qrCodeDataUrl}
-                  alt="Telegram QR Code"
-                  className="border rounded-lg"
-                />
+                {memoizedQRImage}
                 <div className="text-center">
                   {authStatus === 'checking' && (
                     <div className="flex items-center gap-2 text-blue-600">

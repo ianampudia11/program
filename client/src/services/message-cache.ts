@@ -34,6 +34,8 @@ export interface CachedMessage {
 
   cachedAt: number;
   lastAccessed: number;
+  mediaUrlFetchedAt?: number;
+  mediaUrlExpiry?: number;
 }
 
 export interface CachedConversation {
@@ -108,6 +110,8 @@ const DEFAULT_CONFIG: CacheConfig = {
   cleanupThreshold: 0.8, // cleanup when 80% full
   version: 1
 };
+
+const MEDIA_URL_MAX_AGE = 24 * 60 * 60 * 1000; // 24 hours
 
 class MessageCacheService {
   private db: IDBDatabase | null = null;
@@ -232,21 +236,28 @@ class MessageCacheService {
    */
   async cacheMessages(conversationId: number, messages: any[]): Promise<void> {
     await this.ensureInitialized();
-    
+
+    if (messages.length === 0) {
+      return;
+    }
+
     const transaction = this.getTransaction(['messages'], 'readwrite');
     const store = transaction.objectStore('messages');
     const now = Date.now();
 
-    const cachedMessages: CachedMessage[] = messages.map(msg => ({
-      ...msg,
-      cachedAt: now,
-      lastAccessed: now
-    }));
+    const mediaTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+    const cachedMessages: CachedMessage[] = messages.map(msg => {
+      const isMediaMessage = msg.type && mediaTypes.includes(msg.type);
+      return {
+        ...msg,
+        cachedAt: now,
+        lastAccessed: now,
+        mediaUrlFetchedAt: isMediaMessage && msg.mediaUrl ? now : undefined
+      };
+    });
 
     const promises = cachedMessages.map(msg => this.executeRequest(store.put(msg)));
     await Promise.all(promises);
-
-
   }
 
   /**
@@ -256,19 +267,16 @@ class MessageCacheService {
     conversationId: number, 
     page: number = 1, 
     limit: number = 25
-  ): Promise<{ messages: CachedMessage[]; hasMore: boolean; total: number }> {
+  ): Promise<{ messages: CachedMessage[]; hasMore: boolean; total: number; staleMediaCount: number }> {
     await this.ensureInitialized();
     
     const transaction = this.getTransaction(['messages'], 'readonly');
     const store = transaction.objectStore('messages');
     const index = store.index('conversationId');
     
-
     const allMessages = await this.executeRequest(
       index.getAll(IDBKeyRange.only(conversationId))
     );
-
-
 
     allMessages.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -276,18 +284,20 @@ class MessageCacheService {
     const offset = (page - 1) * limit;
     const paginatedMessages = allMessages.slice(offset, offset + limit);
 
-
-
     const messages = paginatedMessages.reverse();
     const hasMore = offset + paginatedMessages.length < total;
 
-
-
+    let staleMediaCount = 0;
+    const now = Date.now();
+    messages.forEach(msg => {
+      if (this.isMediaUrlStale(msg)) {
+        staleMediaCount++;
+      }
+    });
 
     if (messages.length > 0) {
       const updateTransaction = this.getTransaction(['messages'], 'readwrite');
       const updateStore = updateTransaction.objectStore('messages');
-      const now = Date.now();
       
       const updatePromises = messages.map(msg => {
         msg.lastAccessed = now;
@@ -297,7 +307,7 @@ class MessageCacheService {
       await Promise.all(updatePromises);
     }
 
-    return { messages, hasMore, total };
+    return { messages, hasMore, total, staleMediaCount };
   }
 
   /**
@@ -326,14 +336,17 @@ class MessageCacheService {
     const store = transaction.objectStore('messages');
     const now = Date.now();
 
+    const mediaTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+    const isMediaMessage = message.type && mediaTypes.includes(message.type);
+
     const cachedMessage: CachedMessage = {
       ...message,
       cachedAt: now,
-      lastAccessed: now
+      lastAccessed: now,
+      mediaUrlFetchedAt: isMediaMessage && message.mediaUrl ? now : undefined
     };
 
     await this.executeRequest(store.put(cachedMessage));
-
   }
 
   /**
@@ -353,8 +366,11 @@ class MessageCacheService {
         lastAccessed: Date.now()
       };
 
-      await this.executeRequest(store.put(updatedMessage));
+      if (updates.mediaUrl) {
+        updatedMessage.mediaUrlFetchedAt = Date.now();
+      }
 
+      await this.executeRequest(store.put(updatedMessage));
     }
   }
 
@@ -368,7 +384,57 @@ class MessageCacheService {
     const store = transaction.objectStore('messages');
 
     await this.executeRequest(store.delete(messageId));
+  }
 
+  /**
+   * Check if a media URL is stale and needs refresh
+   */
+  isMediaUrlStale(message: CachedMessage): boolean {
+    if (!message.mediaUrl || !message.type) {
+      return false;
+    }
+
+    const mediaTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+    if (!mediaTypes.includes(message.type)) {
+      return false;
+    }
+
+    if (!message.mediaUrlFetchedAt) {
+      return true;
+    }
+
+    const age = Date.now() - message.mediaUrlFetchedAt;
+    return age > MEDIA_URL_MAX_AGE;
+  }
+
+  /**
+   * Refresh media URL for a message
+   */
+  async refreshMediaUrl(messageId: number, newMediaUrl: string): Promise<boolean> {
+    await this.ensureInitialized();
+
+    try {
+      const transaction = this.getTransaction(['messages'], 'readwrite');
+      const store = transaction.objectStore('messages');
+
+      const message = await this.executeRequest(store.get(messageId));
+      if (!message) {
+        return false;
+      }
+
+      const updatedMessage = {
+        ...message,
+        mediaUrl: newMediaUrl,
+        mediaUrlFetchedAt: Date.now(),
+        lastAccessed: Date.now()
+      };
+
+      await this.executeRequest(store.put(updatedMessage));
+      return true;
+    } catch (error) {
+      console.error('Error refreshing media URL:', error);
+      return false;
+    }
   }
 
   /**
@@ -661,6 +727,29 @@ class MessageCacheService {
       const mediaToDelete = allMedia.slice(0, excessCount);
       await Promise.all(mediaToDelete.map(media => this.executeRequest(store.delete(media.url))));
 
+    }
+  }
+
+  /**
+   * Clear all cached media messages from IndexedDB
+   * This should be called on initialization to remove any previously cached media messages
+   */
+  async clearMediaMessages(): Promise<void> {
+    await this.ensureInitialized();
+
+    const transaction = this.getTransaction(['messages'], 'readwrite');
+    const store = transaction.objectStore('messages');
+
+
+    const allMessages = await this.executeRequest(store.getAll());
+
+
+    const mediaTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+    const mediaMessages = allMessages.filter(msg => msg.type && mediaTypes.includes(msg.type));
+
+    if (mediaMessages.length > 0) {
+
+      await Promise.all(mediaMessages.map(msg => this.executeRequest(store.delete(msg.id))));
     }
   }
 

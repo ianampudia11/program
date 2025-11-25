@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import elevenLabsService, { ElevenLabsConfig } from './elevenlabs-service';
 import { aiCredentialsService } from './ai-credentials-service';
 import knowledgeBaseService from './knowledge-base-service';
+import serverI18n from '../utils/server-i18n';
 
 interface ConversationMessage {
   role: 'user' | 'assistant' | 'system';
@@ -30,6 +31,7 @@ interface AIProviderInterface {
       maxAudioDuration?: number;
       functionDefinitions?: any[];
       model?: string;
+      language?: string;
       elevenLabsApiKey?: string;
       elevenLabsVoiceId?: string;
       elevenLabsCustomVoiceId?: string;
@@ -199,7 +201,13 @@ class OpenAIProvider implements AIProviderInterface {
       }
     } catch (error) {
       console.error('OpenAI Provider: Error transcribing audio:', error);
-      throw new Error(`Audio transcription failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMessage = await serverI18n.t(
+        'ai_assistant.error_transcription_failed',
+        'en',
+        `Audio transcription failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { error: error instanceof Error ? error.message : 'Unknown error' }
+      );
+      throw new Error(errorMessage);
     }
   }
 
@@ -264,7 +272,13 @@ class OpenAIProvider implements AIProviderInterface {
       return `media/audio/${mp3FileName}`;
     } catch (error) {
       console.error('OpenAI Provider: Error generating speech:', error);
-      throw new Error(`Speech generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const errorMessage = await serverI18n.t(
+        'ai_assistant.error_speech_generation_failed',
+        'en',
+        `Speech generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { error: error instanceof Error ? error.message : 'Unknown error' }
+      );
+      throw new Error(errorMessage);
     }
   }
 
@@ -329,9 +343,17 @@ class OpenAIProvider implements AIProviderInterface {
               const audioDuration = metadata.whatsappMessage?.message?.audioMessage?.seconds;
 
               if (audioDuration && audioDuration > maxDuration) {
+
+                const language = (options as any).language || 'en';
+                const warningMessage = await serverI18n.t(
+                  'ai_assistant.audio_too_long_warning',
+                  language,
+                  `Your audio message is too long for processing. Please send a shorter message (under ${maxDuration} seconds) or type your message instead.`,
+                  { maxDuration }
+                );
                 return {
                   role: msg.role,
-                  content: `Your audio message is too long for processing. Please send a shorter message (under ${maxDuration} seconds) or type your message instead.`,
+                  content: warningMessage,
                   metadata: msg.metadata
                 };
               }
@@ -359,12 +381,24 @@ class OpenAIProvider implements AIProviderInterface {
                   try {
                     await fs.access(fullAudioPath);
                   } catch (fileError) {
-                    throw new Error(`Audio file not found: ${fullAudioPath}`);
+                    const language = (options as any).language || 'en';
+                    const errorMessage = await serverI18n.t(
+                      'ai_assistant.error_audio_file_not_found',
+                      language,
+                      `Audio file not found: ${fullAudioPath}`,
+                      { path: fullAudioPath }
+                    );
+                    throw new Error(errorMessage);
                   }
 
                   const transcribedText = await this.transcribeAudio(fullAudioPath);
-
-                  const enhancedContent = transcribedText || 'Voice message (transcription failed)';
+                  const language = (options as any).language || 'en';
+                  const fallbackMessage = await serverI18n.t(
+                    'ai_assistant.voice_message_transcription_failed',
+                    language,
+                    'Voice message (transcription failed)'
+                  );
+                  const enhancedContent = transcribedText || fallbackMessage;
 
                   return {
                     role: msg.role,
@@ -372,9 +406,16 @@ class OpenAIProvider implements AIProviderInterface {
                     metadata: msg.metadata
                   };
                 } catch (transcriptionError) {
+                  const language = (options as any).language || 'en';
+                  const errorMessage = await serverI18n.t(
+                    'ai_assistant.voice_message_transcription_error',
+                    language,
+                    `Voice message (transcription failed: ${transcriptionError instanceof Error ? transcriptionError.message : 'Unknown error'})`,
+                    { error: transcriptionError instanceof Error ? transcriptionError.message : 'Unknown error' }
+                  );
                   return {
                     role: msg.role,
-                    content: `Voice message (transcription failed: ${transcriptionError instanceof Error ? transcriptionError.message : 'Unknown error'})`,
+                    content: errorMessage,
                     metadata: msg.metadata
                   };
                 }
@@ -584,7 +625,7 @@ class OpenAIProvider implements AIProviderInterface {
     } catch (error) {
       console.error('OpenAI Provider: Error in generateResponse', error);
       return {
-        text: `I apologize, but I'm having trouble processing your request: ${error instanceof Error ? error.message : 'Unknown error'}`
+        text: ""
       };
     }
   }
@@ -701,7 +742,7 @@ class OpenRouterProvider implements AIProviderInterface {
       baseURL: 'https://openrouter.ai/api/v1',
       defaultHeaders: {
         'HTTP-Referer': 'https://powerchat.plus',
-        'X-Title': 'BotHive Plus'
+        'X-Title': 'PowerChat Plus'
       }
     });
   }
@@ -798,7 +839,7 @@ class OpenRouterProvider implements AIProviderInterface {
 
       const response = await this.client.chat.completions.create(requestParams);
 
-      let text = response.choices[0]?.message?.content || "I apologize, but I couldn't generate a response. Please try again.";
+      let text = response.choices[0]?.message?.content || "";
       let functionCalls: Array<{ name: string, arguments: any }> = [];
 
 
@@ -817,7 +858,7 @@ class OpenRouterProvider implements AIProviderInterface {
     } catch (error) {
       console.error('OpenRouter Provider: Error in generateResponse', error);
       return {
-        text: `I apologize, but I'm having trouble processing your request: ${error instanceof Error ? error.message : 'Unknown error'}`
+        text: ""
       };
     }
   }
@@ -1000,11 +1041,16 @@ class AIAssistantService {
   /**
    * Generate audio capability prompt based on configuration
    */
-  private generateAudioCapabilityPrompt(config: any): string {
+  private async generateAudioCapabilityPrompt(config: any, language: string = 'en'): Promise<string> {
     const capabilities = [];
 
     if (config.enableVoiceProcessing) {
-      capabilities.push('process and understand voice messages/audio files');
+      const capabilityText = await serverI18n.t(
+        'ai_assistant.audio_capability_process',
+        language,
+        'process and understand voice messages/audio files'
+      );
+      capabilities.push(capabilityText);
     }
 
     if (config.enableTextToSpeech) {
@@ -1014,20 +1060,42 @@ class AIAssistantService {
       let responseMode = '';
       switch (voiceResponseMode) {
         case 'always':
-          responseMode = 'You will respond with both text and voice messages for all interactions.';
+          responseMode = await serverI18n.t(
+            'ai_assistant.voice_mode_always_prompt',
+            language,
+            'You will respond with both text and voice messages for all interactions.'
+          );
           break;
         case 'voice_only':
         case 'voice-to-voice':
-          responseMode = 'You will respond with voice messages only when the user sends you a voice message.';
+          responseMode = await serverI18n.t(
+            'ai_assistant.voice_mode_voice_only_prompt',
+            language,
+            'You will respond with voice messages only when the user sends you a voice message.'
+          );
           break;
         case 'never':
-          responseMode = 'You will only respond with text messages.';
+          responseMode = await serverI18n.t(
+            'ai_assistant.voice_mode_never_prompt',
+            language,
+            'You will only respond with text messages.'
+          );
           break;
         default:
-          responseMode = 'You can respond with voice messages when appropriate.';
+          responseMode = await serverI18n.t(
+            'ai_assistant.voice_mode_always_prompt',
+            language,
+            'You can respond with voice messages when appropriate.'
+          );
       }
 
-      capabilities.push(`generate voice responses using ${ttsProvider === 'elevenlabs' ? 'ElevenLabs' : 'OpenAI'} text-to-speech technology`);
+      const ttsCapabilityText = await serverI18n.t(
+        'ai_assistant.audio_capability_generate',
+        language,
+        `generate voice responses using ${ttsProvider === 'elevenlabs' ? 'ElevenLabs' : 'OpenAI'} text-to-speech technology`,
+        { provider: ttsProvider === 'elevenlabs' ? 'ElevenLabs' : 'OpenAI' }
+      );
+      capabilities.push(ttsCapabilityText);
       capabilities.push(responseMode);
     }
 
@@ -1036,7 +1104,6 @@ class AIAssistantService {
     }
 
     const maxDuration = config.maxAudioDuration || 30;
-
 
     let capabilityDescription = '';
     if (capabilities.length === 1) {
@@ -1047,18 +1114,71 @@ class AIAssistantService {
       capabilityDescription = `${capabilities.slice(0, -1).join(', ')}, and ${capabilities[capabilities.length - 1]}`;
     }
 
-    return `
-AUDIO PROCESSING CAPABILITIES:
-You have advanced audio processing capabilities and can ${capabilityDescription}
+    const title = await serverI18n.t(
+      'ai_assistant.audio_guidelines_title',
+      language,
+      'AUDIO PROCESSING CAPABILITIES:'
+    );
+    const intro = await serverI18n.t(
+      'ai_assistant.audio_guidelines_intro',
+      language,
+      `You have advanced audio processing capabilities and can ${capabilityDescription}`,
+      { capabilities: capabilityDescription }
+    );
+    const importantTitle = await serverI18n.t(
+      'ai_assistant.audio_guidelines_important',
+      language,
+      'IMPORTANT AUDIO GUIDELINES:'
+    );
+    const guideline1 = await serverI18n.t(
+      'ai_assistant.audio_guideline_can_process',
+      language,
+      'You CAN process voice messages and audio files that users send to you'
+    );
+    const guideline2 = await serverI18n.t(
+      'ai_assistant.audio_guideline_acknowledge',
+      language,
+      'When users send voice messages, acknowledge that you received and understood their audio message'
+    );
+    const guideline3 = await serverI18n.t(
+      'ai_assistant.audio_guideline_understand',
+      language,
+      'You can understand speech, transcribe audio content, and respond appropriately to voice inputs'
+    );
+    const guideline4 = await serverI18n.t(
+      'ai_assistant.audio_guideline_limit',
+      language,
+      `Audio messages are limited to ${maxDuration} seconds for processing efficiency`,
+      { maxDuration }
+    );
+    const guideline5 = await serverI18n.t(
+      'ai_assistant.audio_guideline_never_claim',
+      language,
+      'Never claim that you cannot process voice messages or audio files - you have full audio processing capabilities'
+    );
+    const guideline6 = await serverI18n.t(
+      'ai_assistant.audio_guideline_natural',
+      language,
+      'Respond naturally to voice messages as you would to any text message'
+    );
+    const guideline7 = await serverI18n.t(
+      'ai_assistant.audio_guideline_conversational',
+      language,
+      'Be conversational. And don\'t tell the user that you have the ability of voice processing etc just respond to their request directly.'
+    );
 
-IMPORTANT AUDIO GUIDELINES:
-- You CAN process voice messages and audio files that users send to you
-- When users send voice messages, acknowledge that you received and understood their audio message
-- You can understand speech, transcribe audio content, and respond appropriately to voice inputs
-- Audio messages are limited to ${maxDuration} seconds for processing efficiency
-- Never claim that you cannot process voice messages or audio files - you have full audio processing capabilities
-- Respond naturally to voice messages as you would to any text message
-- Be conversational. And don't tell the user that you have the ability of voice processing etc just respond to thier request directly.
+    return `
+${title}
+${intro}
+
+${importantTitle}
+- ${guideline1}
+- ${guideline2}
+- ${guideline3}
+- ${guideline4}
+- ${guideline5}
+- ${guideline6}
+- ${guideline7}
 
 ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabilities.length - 1] : ''}`.trim();
   }
@@ -1097,7 +1217,14 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
       return this.getProvider('openai', '', companyId);
     }
 
-    throw new Error(`No API key available for ${provider} provider. Please configure credentials in the admin panel or provide an API key in the node settings.`);
+    const language = 'en'; // Default for error messages
+    const errorMessage = await serverI18n.t(
+      'ai_assistant.error_no_api_key',
+      language,
+      `No API key available for ${provider} provider. Please configure credentials in the admin panel or provide an API key in the node settings.`,
+      { provider }
+    );
+    throw new Error(errorMessage);
   }
 
   private createProviderInstance(provider: string, apiKey: string): AIProviderInterface {
@@ -1159,6 +1286,9 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
       elevenLabsStyle?: number;
       elevenLabsUseSpeakerBoost?: boolean;
 
+      enableMCPServers?: boolean;
+      mcpServers?: any[];
+
       nodeId?: string;
       knowledgeBaseEnabled?: boolean;
       knowledgeBaseConfig?: {
@@ -1167,6 +1297,7 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
         contextPosition?: 'before_system' | 'after_system' | 'before_user';
         contextTemplate?: string;
       };
+      language?: string;
     },
     conversationHistory: Message[] = [],
     companyId?: number
@@ -1177,6 +1308,8 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
     triggeredTasks?: string[];
     triggeredCalendarFunctions?: any[];
     triggeredZohoCalendarFunctions?: any[];
+    triggeredMCPTools?: any[];
+    mcpResults?: any[];
   }> {
     try {
 
@@ -1186,7 +1319,8 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
       const shouldEnableTaskFunctions = config.enableTaskExecution && config.tasks && config.tasks.length > 0;
       const shouldEnableCalendarFunctions = config.enableGoogleCalendar && config.calendarFunctions && config.calendarFunctions.length > 0;
       const shouldEnableZohoCalendarFunctions = config.enableZohoCalendar && config.zohoCalendarFunctions && config.zohoCalendarFunctions.length > 0;
-      const shouldEnableFunctionCalling = shouldEnableTaskFunctions || shouldEnableCalendarFunctions || shouldEnableZohoCalendarFunctions;
+      const shouldEnableMCPServers = config.enableMCPServers && config.mcpServers && config.mcpServers.length > 0;
+      const shouldEnableFunctionCalling = shouldEnableTaskFunctions || shouldEnableCalendarFunctions || shouldEnableZohoCalendarFunctions || shouldEnableMCPServers;
 
 
       if (shouldEnableTaskFunctions && config.tasks) {
@@ -1212,6 +1346,29 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
       }
 
 
+      if (shouldEnableMCPServers && config.mcpServers) {
+        const mcpClientService = (await import('./mcp-client-service')).default;
+        const { convertMCPToolToOpenAIFunction } = await import('./mcp-tool-converter');
+        
+        for (const serverConfig of config.mcpServers.filter((s: any) => s.enabled)) {
+          try {
+            const connection = await mcpClientService.getOrCreateConnection(serverConfig);
+            const mcpTools = connection.tools || [];
+            
+
+            const openAIFunctions = mcpTools.map(tool => 
+              convertMCPToolToOpenAIFunction(tool)
+            );
+            
+            functionDefinitions = [...functionDefinitions, ...openAIFunctions];
+          } catch (error) {
+            console.error(`Failed to discover tools from MCP server ${serverConfig.name}:`, error);
+
+          }
+        }
+      }
+
+
       let knowledgeBaseContext = '';
       if (config.knowledgeBaseEnabled && config.nodeId && companyId) {
         try {
@@ -1227,17 +1384,29 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
 
           if (retrievalResults && retrievalResults.length > 0) {
             const maxChunks = kbConfig.maxRetrievedChunks || 3;
-            const contextTemplate = kbConfig.contextTemplate ||
-              'Based on the following knowledge base information:\n\n{context}\n\nPlease answer the user\'s question using this information when relevant.';
+            const language = config.language || 'en';
+            const defaultTemplate = await serverI18n.t(
+              'ai_assistant.knowledge_base_context_template',
+              language,
+              'Based on the following knowledge base information:\n\n{context}\n\nPlease answer the user\'s question using this information when relevant.'
+            );
+            const contextTemplate = kbConfig.contextTemplate || defaultTemplate.replace('{context}', '{{context}}');
 
 
-            const contextChunks = retrievalResults
+            const contextChunksPromises = retrievalResults
               .slice(0, maxChunks)
-              .map((result, index) => {
+              .map(async (result, index) => {
                 const similarity = (result.similarity * 100).toFixed(1);
-                return `[Document: ${result.document.originalName}] (Relevance: ${similarity}%)\n${result.chunk.content}`;
-              })
-              .join('\n\n---\n\n');
+                const language = config.language || 'en';
+                const label = await serverI18n.t(
+                  'ai_assistant.knowledge_base_document_label',
+                  language,
+                  `[Document: ${result.document.originalName}] (Relevance: ${similarity}%)`,
+                  { name: result.document.originalName, similarity }
+                );
+                return `${label}\n${result.chunk.content}`;
+              });
+            const contextChunks = (await Promise.all(contextChunksPromises)).join('\n\n---\n\n');
 
             knowledgeBaseContext = contextTemplate.replace('{context}', contextChunks);
 
@@ -1249,10 +1418,16 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
         }
       }
 
+      const language = config.language || 'en';
+      await serverI18n.ensureLanguageLoaded(language);
 
 
-      let enhancedSystemPrompt = config.systemPrompt || 'You are a helpful assistant.';
-
+      const defaultSystemPrompt = await serverI18n.t(
+        'ai_assistant.default_system_prompt',
+        language,
+        'You are a helpful assistant. Answer user questions concisely and accurately. Only perform specific actions when the user explicitly requests them.'
+      );
+      let enhancedSystemPrompt = config.systemPrompt || defaultSystemPrompt;
 
       const contextPosition = config.knowledgeBaseConfig?.contextPosition || 'before_system';
       if (knowledgeBaseContext) {
@@ -1266,23 +1441,70 @@ ${config.enableTextToSpeech && capabilities.length > 0 ? capabilities[capabiliti
 
       const hasAudioCapabilities = config.enableVoiceProcessing || config.enableTextToSpeech;
       if (hasAudioCapabilities) {
-        const audioCapabilityText = this.generateAudioCapabilityPrompt(config);
+        const audioCapabilityText = await this.generateAudioCapabilityPrompt(config, language);
         enhancedSystemPrompt = `${enhancedSystemPrompt}
 
 ${audioCapabilityText}`;
       }
 
       if (shouldEnableFunctionCalling && functionDefinitions.length > 0) {
+        const functionRulesTitle = await serverI18n.t(
+          'ai_assistant.function_calling_rules_title',
+          language,
+          'IMPORTANT FUNCTION CALLING RULES:'
+        );
+        const rule1 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_explicit',
+          language,
+          'Only call functions when the user explicitly requests the specific action'
+        );
+        const rule2 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_no_greetings',
+          language,
+          'Do NOT call functions for general greetings, questions, or casual conversation'
+        );
+        const rule3 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_clear_intent',
+          language,
+          'Do NOT call functions unless there is clear, unambiguous user intent'
+        );
+        const rule4 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_greeting_examples',
+          language,
+          'For greetings like "Hello", "Hi", "How are you?" - respond normally without calling any functions'
+        );
+        const rule5 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_specific',
+          language,
+          'Only use functions when the user specifically asks for something that matches the function\'s purpose'
+        );
+        const rule6 = await serverI18n.t(
+          'ai_assistant.function_calling_rule_conservative',
+          language,
+          'Be conservative - when in doubt, respond normally without calling functions'
+        );
         enhancedSystemPrompt = `${enhancedSystemPrompt}
 
-IMPORTANT FUNCTION CALLING RULES:
-- Only call functions when the user explicitly requests the specific action
-- Do NOT call functions for general greetings, questions, or casual conversation
-- Do NOT call functions unless there is clear, unambiguous user intent
-- For greetings like "Hello", "Hi", "How are you?" - respond normally without calling any functions
-- Only use functions when the user specifically asks for something that matches the function's purpose
-- Be conservative - when in doubt, respond normally without calling functions`;
+${functionRulesTitle}
+- ${rule1}
+- ${rule2}
+- ${rule3}
+- ${rule4}
+- ${rule5}
+- ${rule6}`;
       }
+
+
+      const languageName = serverI18n.getLanguageName(language);
+      const languageInstruction = await serverI18n.t(
+        'ai_assistant.respond_in_language',
+        language,
+        `Respond in ${languageName}.`,
+        { language: languageName }
+      );
+      enhancedSystemPrompt = `${enhancedSystemPrompt}
+
+${languageInstruction}`;
 
 
       let messages: ConversationMessage[];
@@ -1316,6 +1538,7 @@ IMPORTANT FUNCTION CALLING RULES:
           maxAudioDuration: config.maxAudioDuration,
           functionDefinitions,
           model: config.model,
+          language: language,
           elevenLabsApiKey: config.elevenLabsApiKey,
           elevenLabsVoiceId: config.elevenLabsVoiceId,
           elevenLabsCustomVoiceId: config.elevenLabsCustomVoiceId,
@@ -1329,6 +1552,7 @@ IMPORTANT FUNCTION CALLING RULES:
         const triggeredTasks: string[] = [];
         const triggeredCalendarFunctions: any[] = [];
         const triggeredZohoCalendarFunctions: any[] = [];
+        const triggeredMCPTools: any[] = [];
 
         if (response.functionCalls && response.functionCalls.length > 0) {
 
@@ -1377,6 +1601,62 @@ IMPORTANT FUNCTION CALLING RULES:
               }
             }
           }
+
+
+          if (shouldEnableMCPServers && config.mcpServers) {
+            const mcpClientService = (await import('./mcp-client-service')).default;
+            
+            for (const functionCall of response.functionCalls) {
+
+              for (const serverConfig of config.mcpServers.filter((s: any) => s.enabled)) {
+                try {
+                  const connection = await mcpClientService.getOrCreateConnection(serverConfig);
+                  const toolExists = connection.tools.some(tool => tool.name === functionCall.name);
+                  
+                  if (toolExists) {
+                    triggeredMCPTools.push({
+                      serverConfig,
+                      functionCall
+                    });
+                    break; // Found the server, no need to check others
+                  }
+                } catch (error) {
+                  console.error(`Error checking MCP server ${serverConfig.name} for tool ${functionCall.name}:`, error);
+                }
+              }
+            }
+          }
+        }
+
+
+        const mcpResults: any[] = [];
+        if (triggeredMCPTools.length > 0) {
+          const mcpClientService = (await import('./mcp-client-service')).default;
+          
+          for (const mcpTool of triggeredMCPTools) {
+            try {
+              const result = await mcpClientService.executeToolCall(
+                mcpTool.serverConfig.id,
+                mcpTool.functionCall.name,
+                mcpTool.functionCall.arguments || {}
+              );
+              
+              mcpResults.push({
+                tool: mcpTool.functionCall.name,
+                server: mcpTool.serverConfig.name,
+                result: result,
+                success: true
+              });
+            } catch (error: any) {
+              console.error(`MCP tool execution failed for ${mcpTool.functionCall.name}:`, error);
+              mcpResults.push({
+                tool: mcpTool.functionCall.name,
+                server: mcpTool.serverConfig.name,
+                error: error.message || 'Unknown error',
+                success: false
+              });
+            }
+          }
         }
 
 
@@ -1411,18 +1691,20 @@ IMPORTANT FUNCTION CALLING RULES:
           ...response,
           triggeredTasks,
           triggeredCalendarFunctions,
-          triggeredZohoCalendarFunctions
+          triggeredZohoCalendarFunctions,
+          triggeredMCPTools,
+          mcpResults
         };
       } catch (providerError) {
         console.error('AI Assistant: Error calling provider.generateResponse:', providerError);
         return {
-          text: "I apologize, but I'm having trouble processing your request at the moment. Please try again later."
+          text: ""
         };
       }
     } catch (error) {
       console.error('Error in AI Assistant service:', error);
       return {
-        text: `Error processing your message: ${error instanceof Error ? error.message : 'Unknown error occurred'}`
+        text: ""
       };
     }
   }

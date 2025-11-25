@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
 import { useBranding } from '@/contexts/branding-context';
+import useSocket from '@/hooks/useSocket';
 import {
   Card,
   CardContent,
@@ -80,6 +81,7 @@ import {
   Settings,
   Plus,
   Shield,
+  ShieldCheck,
   Calendar,
   Loader2,
   AlertTriangle,
@@ -160,12 +162,27 @@ export default function BackupManagement() {
 
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [selectedBackupForRestore, setSelectedBackupForRestore] = useState<BackupRecord | null>(null);
-  const [restoreStep, setRestoreStep] = useState<'warning' | 'confirmation' | 'progress'>('warning');
+  const [restoreStep, setRestoreStep] = useState<'preflight' | 'warning' | 'confirmation' | 'progress'>('preflight');
   const [confirmationText, setConfirmationText] = useState('');
   const [restoreProgress, setRestoreProgress] = useState<{
-    status: 'downloading' | 'verifying' | 'restoring' | 'completed' | 'failed';
+    status: string;
     message: string;
+    percent?: number;
   } | null>(null);
+  const [preflightChecks, setPreflightChecks] = useState<{
+    success: boolean;
+    checks: Array<{
+      name: string;
+      status: 'passed' | 'failed' | 'warning';
+      message: string;
+      critical: boolean;
+    }>;
+    canProceed: boolean;
+  } | null>(null);
+  const currentRestoreIdRef = useRef<string | null>(null);
+
+
+  const { onMessage } = useSocket('/ws');
 
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<BackupSchedule | null>(null);
@@ -206,19 +223,27 @@ export default function BackupManagement() {
   const [oauthForm, setOauthForm] = useState({
     client_id: '',
     client_secret: '',
-    redirect_uri: 'http://localhost:3000/admin/settings?tab=backup'
+    redirect_uri: `${window.location.origin}${window.location.pathname}${window.location.search ? window.location.search : '?tab=backup'}`
   });
   const [showOauthForm, setShowOauthForm] = useState(false);
 
 
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const [uploadMethod, setUploadMethod] = useState<'file' | 'url'>('file');
   const [uploadForm, setUploadForm] = useState({
     description: '',
     storage_locations: ['local'],
-    file: null as File | null
+    file: null as File | null,
+    url: ''
   });
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
+  const [isValidatingUrl, setIsValidatingUrl] = useState(false);
+  const [urlValidationError, setUrlValidationError] = useState<string | null>(null);
+
+
+  const [logsPage, setLogsPage] = useState(0);
+  const [logsPageSize, setLogsPageSize] = useState(50);
 
   const { data: config, isLoading: isLoadingConfig } = useQuery<BackupConfig>({
     queryKey: ['/api/admin/backup/config'],
@@ -256,7 +281,47 @@ export default function BackupManagement() {
     }
   });
 
+  const { data: backupLogs } = useQuery<{
+    logs: Array<{
+      id: string;
+      scheduleId: string;
+      backupId: string | null;
+      status: string;
+      timestamp: string;
+      errorMessage: string | null;
+      metadata: any;
+      createdAt: string;
+    }>;
+    total: number;
+    limit: number;
+    offset: number;
+  }>({
+    queryKey: ['/api/admin/backup/logs', logsPage, logsPageSize],
+    queryFn: async () => {
+      const offset = logsPage * logsPageSize;
+      const res = await apiRequest('GET', `/api/admin/backup/logs?limit=${logsPageSize}&offset=${offset}`);
+      if (!res.ok) throw new Error('Failed to fetch backup logs');
+      return res.json();
+    },
+    refetchInterval: 60000 // Refetch every minute
+  });
 
+
+  const lastCleanup = backupLogs?.logs
+    ?.filter((log: any) => {
+      const eventType = log.metadata?.event_type;
+      return eventType === 'cleanup' || eventType === 'cleanup_completed' || eventType === 'cleanup_failed';
+    })
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+  const { data: toolsStatus } = useQuery({
+    queryKey: ['/api/admin/backup/tools'],
+    queryFn: async () => {
+      const res = await apiRequest('GET', '/api/admin/backup/tools');
+      if (!res.ok) throw new Error('Failed to fetch tools status');
+      return res.json();
+    }
+  });
 
   const createBackupMutation = useMutation({
     mutationFn: async () => {
@@ -308,6 +373,35 @@ export default function BackupManagement() {
     }
   });
 
+  const cleanupBackupsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/admin/backup/cleanup');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.details || 'Failed to cleanup old backups');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: t('common.success', 'Success'),
+        description: `${data.message}${data.errors?.length > 0 ? ` (${data.errors.length} errors)` : ''}`,
+        variant: data.errors?.length > 0 ? 'destructive' : 'default',
+        duration: 8000
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/list'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/stats'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/logs'] });
+    },
+    onError: (error) => {
+      toast({
+        title: t('common.error', 'Error'),
+        description: error.message,
+        variant: 'destructive'
+      });
+    }
+  });
+
   const verifyBackupMutation = useMutation({
     mutationFn: async (backupId: string) => {
       const res = await apiRequest('POST', `/api/admin/backup/verify/${backupId}`);
@@ -326,6 +420,50 @@ export default function BackupManagement() {
         title: t('common.error', 'Error'),
         description: error.message,
         variant: 'destructive'
+      });
+    }
+  });
+
+  const verifyDeepBackupMutation = useMutation({
+    mutationFn: async (backupId: string) => {
+      const res = await apiRequest('POST', `/api/admin/backup/verify-deep/${backupId}`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.details || 'Failed to perform deep verification');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const timingInfo = data.timings
+        ? ` (${(data.timings.total_ms / 1000).toFixed(1)}s)`
+        : '';
+
+      let description = data.message;
+      if (data.details) {
+        description += `\n\nTables: ${data.details.table_count}, Key tables found: ${data.details.key_tables_found}`;
+        if (data.details.row_counts) {
+          const counts = Object.entries(data.details.row_counts)
+            .map(([table, count]) => `${table}: ${count}`)
+            .join(', ');
+          description += `\nRow counts: ${counts}`;
+        }
+      }
+
+      toast({
+        title: data.valid
+          ? t('admin.backup.messages.deep_verify_success', 'Deep Verification Passed') + timingInfo
+          : t('admin.backup.messages.deep_verify_failed', 'Deep Verification Failed') + timingInfo,
+        description,
+        variant: data.valid ? 'default' : 'destructive',
+        duration: 10000
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: t('common.error', 'Error'),
+        description: error.message,
+        variant: 'destructive',
+        duration: 8000
       });
     }
   });
@@ -403,19 +541,90 @@ export default function BackupManagement() {
     }
   });
 
+  const uploadBackupFromUrlMutation = useMutation({
+    mutationFn: async ({ url, description, storage_locations }: {
+      url: string;
+      description: string;
+      storage_locations: string[]
+    }) => {
+      const res = await apiRequest('POST', '/api/admin/backup/upload-from-url', {
+        url,
+        description,
+        storage_locations
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to upload backup from URL');
+      }
+      return res.json();
+    },
+    onMutate: () => {
+      setIsUploading(true);
+      setUploadProgress(0);
+    },
+    onSuccess: () => {
+      toast({
+        title: t('common.success', 'Success'),
+        description: t('admin.backup.messages.backup_uploaded', 'Backup uploaded successfully')
+      });
+      setUploadDialogOpen(false);
+      resetUploadForm();
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/list'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/stats'] });
+    },
+    onError: (error) => {
+      toast({
+        title: t('common.error', 'Error'),
+        description: error.message,
+        variant: 'destructive'
+      });
+    },
+    onSettled: () => {
+      setIsUploading(false);
+      setUploadProgress(0);
+    }
+  });
+
+
+  useEffect(() => {
+    const unsubscribe = onMessage('backup:restore:progress', (event: any) => {
+      const { restoreId, status, message, percent } = event.data;
+
+
+      if (restoreId === currentRestoreIdRef.current) {
+        setRestoreProgress({ status, message, percent });
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [onMessage]);
+
   const restoreBackupMutation = useMutation({
     mutationFn: async ({ backupId, confirmationText }: { backupId: string; confirmationText: string }) => {
-      setRestoreProgress({ status: 'downloading', message: t('admin.backup.restore.preparing', 'Preparing restoration...') });
+      setRestoreProgress({ status: 'started', message: t('admin.backup.restore.preparing', 'Preparing restoration...'), percent: 0 });
 
       const res = await apiRequest('POST', `/api/admin/backup/restore/${backupId}`, {
         confirmationText
       });
       if (!res.ok) throw new Error('Failed to restore backup');
-      return res.json();
+      const data = await res.json();
+
+
+      if (data.restoreId) {
+        currentRestoreIdRef.current = data.restoreId;
+      }
+
+      return data;
     },
     onSuccess: (data) => {
       if (data.success) {
-        setRestoreProgress({ status: 'completed', message: data.message });
+
+        if (!restoreProgress || restoreProgress.status !== 'completed') {
+          setRestoreProgress({ status: 'completed', message: data.message, percent: 100 });
+        }
+
         toast({
           title: t('admin.backup.messages.restore_successful', 'Restore Successful'),
           description: data.message
@@ -426,9 +635,10 @@ export default function BackupManagement() {
           queryClient.invalidateQueries({ queryKey: ['/api/admin/backup/stats'] });
           setRestoreDialogOpen(false);
           resetRestoreDialog();
+          currentRestoreIdRef.current = null;
         }, 3000);
       } else {
-        setRestoreProgress({ status: 'failed', message: data.message });
+        setRestoreProgress({ status: 'failed', message: data.message, percent: 0 });
         toast({
           title: t('admin.backup.messages.restore_failed', 'Restore Failed'),
           description: data.message,
@@ -436,10 +646,29 @@ export default function BackupManagement() {
         });
       }
     },
-    onError: (error) => {
-      setRestoreProgress({ status: 'failed', message: error.message });
+    onError: (error: any) => {
+      setRestoreProgress({ status: 'failed', message: error.message, percent: 0 });
       toast({
         title: t('admin.backup.messages.restore_error', 'Restore Error'),
+        description: error.message,
+        variant: 'destructive'
+      });
+      currentRestoreIdRef.current = null;
+    }
+  });
+
+  const preflightChecksMutation = useMutation({
+    mutationFn: async (backupId: string) => {
+      const res = await apiRequest('GET', `/api/admin/backup/restore-preflight/${backupId}`);
+      if (!res.ok) throw new Error('Failed to perform preflight checks');
+      return await res.json();
+    },
+    onSuccess: (data) => {
+      setPreflightChecks(data);
+    },
+    onError: (error: any) => {
+      toast({
+        title: t('admin.backup.messages.preflight_error', 'Preflight Check Failed'),
         description: error.message,
         variant: 'destructive'
       });
@@ -449,16 +678,21 @@ export default function BackupManagement() {
   const openRestoreDialog = (backup: BackupRecord) => {
     setSelectedBackupForRestore(backup);
     setRestoreDialogOpen(true);
-    setRestoreStep('warning');
+    setRestoreStep('preflight');
     setConfirmationText('');
     setRestoreProgress(null);
+    setPreflightChecks(null);
+
+
+    preflightChecksMutation.mutate(backup.id);
   };
 
   const resetRestoreDialog = () => {
     setSelectedBackupForRestore(null);
-    setRestoreStep('warning');
+    setRestoreStep('preflight');
     setConfirmationText('');
     setRestoreProgress(null);
+    setPreflightChecks(null);
   };
 
   const handleRestoreConfirm = () => {
@@ -475,6 +709,35 @@ export default function BackupManagement() {
     return backup.status === 'creating' || backup.status === 'failed' || backup.status === 'uploading';
   };
 
+
+
+
+  const isRestoreToolAvailable = (backup: BackupRecord): boolean => {
+    const filename = backup.filename.toLowerCase();
+
+    if (filename.endsWith('.sql')) {
+      return toolsStatus?.psql?.available || false;
+    }
+
+    if (filename.endsWith('.backup') || filename.endsWith('.dump') || filename.endsWith('.bak')) {
+      return toolsStatus?.pg_restore?.available || false;
+    }
+
+    return toolsStatus?.psql?.available && toolsStatus?.pg_restore?.available;
+  };
+
+
+  const getRestoreToolRequirement = (backup: BackupRecord): string => {
+    const filename = backup.filename.toLowerCase();
+    if (filename.endsWith('.sql')) {
+      return t('admin.backup.actions.psql_required', 'PostgreSQL psql tool required for SQL format backups');
+    }
+    if (filename.endsWith('.backup') || filename.endsWith('.dump') || filename.endsWith('.bak')) {
+      return t('admin.backup.actions.pg_restore_required', 'PostgreSQL pg_restore tool required for custom format backups');
+    }
+    return t('admin.backup.actions.tools_required', 'PostgreSQL tools required (pg_dump, psql)');
+  };
+
   const getRequiredConfirmationText = (): string => {
     return selectedBackupForRestore?.filename || 'RESTORE';
   };
@@ -483,31 +746,124 @@ export default function BackupManagement() {
     setUploadForm({
       description: '',
       storage_locations: ['local'],
-      file: null
+      file: null,
+      url: ''
     });
     setUploadProgress(0);
     setIsUploading(false);
+    setUploadMethod('file');
+    setUrlValidationError(null);
   };
 
-  const handleUploadSubmit = () => {
-    if (!uploadForm.file) {
-      toast({
-        title: t('common.error', 'Error'),
-        description: t('admin.backup.upload.no_file_selected', 'Please select a backup file to upload'),
-        variant: 'destructive'
-      });
-      return;
-    }
+  const validateUrl = (url: string): boolean => {
+    try {
+      const urlObj = new URL(url);
+      if (!['http:', 'https:'].includes(urlObj.protocol)) {
+        setUrlValidationError(t('admin.backup.upload.invalid_protocol', 'Only HTTP and HTTPS protocols are supported'));
+        return false;
+      }
 
-    uploadBackupMutation.mutate({
-      file: uploadForm.file,
-      description: uploadForm.description || `Uploaded backup: ${uploadForm.file.name}`,
-      storage_locations: uploadForm.storage_locations
-    });
+      const allowedExtensions = ['.sql', '.backup', '.dump', '.bak'];
+      const pathname = urlObj.pathname.toLowerCase();
+      const hasValidExtension = allowedExtensions.some(ext => pathname.endsWith(ext));
+
+      if (!hasValidExtension) {
+        setUrlValidationError(t('admin.backup.upload.invalid_extension', 'URL must point to a valid backup file (.sql, .backup, .dump, .bak)'));
+        return false;
+      }
+
+      setUrlValidationError(null);
+      return true;
+    } catch (e) {
+      setUrlValidationError(t('admin.backup.upload.invalid_url', 'Please enter a valid URL'));
+      return false;
+    }
+  };
+
+  const validateUrlAccessibility = async (url: string): Promise<boolean> => {
+    setIsValidatingUrl(true);
+    setUrlValidationError(null);
+
+    try {
+      const res = await apiRequest('POST', '/api/admin/backup/validate-url', { url });
+      const data = await res.json();
+
+      if (!res.ok || !data.accessible) {
+        setUrlValidationError(data.error || t('admin.backup.upload.url_not_accessible', 'URL is not accessible'));
+        return false;
+      }
+
+      if (data.contentLength && data.contentLength > 3000 * 1024 * 1024) {
+        setUrlValidationError(t('admin.backup.upload.file_too_large', 'File size exceeds 3000MB limit'));
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      setUrlValidationError(t('admin.backup.upload.validation_failed', 'Failed to validate URL'));
+      return false;
+    } finally {
+      setIsValidatingUrl(false);
+    }
+  };
+
+  const handleUploadSubmit = async () => {
+    if (uploadMethod === 'file') {
+      if (!uploadForm.file) {
+        toast({
+          title: t('common.error', 'Error'),
+          description: t('admin.backup.upload.no_file_selected', 'Please select a backup file to upload'),
+          variant: 'destructive'
+        });
+        return;
+      }
+
+      uploadBackupMutation.mutate({
+        file: uploadForm.file,
+        description: uploadForm.description || `Uploaded backup: ${uploadForm.file.name}`,
+        storage_locations: uploadForm.storage_locations
+      });
+    } else {
+      if (!uploadForm.url.trim()) {
+        toast({
+          title: t('common.error', 'Error'),
+          description: t('admin.backup.upload.no_url_provided', 'Please enter a backup file URL'),
+          variant: 'destructive'
+        });
+        return;
+      }
+
+      if (!validateUrl(uploadForm.url)) {
+        return;
+      }
+
+      const isAccessible = await validateUrlAccessibility(uploadForm.url);
+      if (!isAccessible) {
+        return;
+      }
+
+      const urlObj = new URL(uploadForm.url);
+      const filename = urlObj.pathname.split('/').pop() || 'backup';
+
+      uploadBackupFromUrlMutation.mutate({
+        url: uploadForm.url,
+        description: uploadForm.description || `Uploaded backup from URL: ${filename}`,
+        storage_locations: uploadForm.storage_locations
+      });
+    }
   };
 
   const handleFileSelected = (file: File) => {
     setUploadForm(prev => ({ ...prev, file }));
+  };
+
+  const handleUrlChange = (url: string) => {
+    setUploadForm(prev => ({ ...prev, url }));
+    if (url.trim()) {
+      validateUrl(url);
+    } else {
+      setUrlValidationError(null);
+    }
   };
 
   const saveScheduleMutation = useMutation({
@@ -991,6 +1347,153 @@ export default function BackupManagement() {
             </Card>
           </div>
 
+          {/* Tools Status Panel */}
+          {toolsStatus && (
+            <>
+              {(!toolsStatus.pg_dump?.available || !toolsStatus.psql?.available) && (
+                <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" />
+                    <div className="flex-1">
+                      <h4 className="font-semibold text-destructive mb-1">
+                        {t('admin.backup.tools.critical_missing', 'Critical PostgreSQL Tools Missing')}
+                      </h4>
+                      <p className="text-sm text-muted-foreground mb-2">
+                        {t('admin.backup.tools.install_required', 'Some backup and restore operations require PostgreSQL client tools to be installed on the server.')}
+                      </p>
+                      {!toolsStatus.pg_dump?.available && (
+                        <p className="text-sm text-destructive">
+                          • pg_dump: {toolsStatus.pg_dump?.error || 'Not available'}
+                        </p>
+                      )}
+                      {!toolsStatus.psql?.available && (
+                        <p className="text-sm text-destructive">
+                          • psql: {toolsStatus.psql?.error || 'Not available'}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Settings className="h-5 w-5" />
+                    {t('admin.backup.tools.title', 'PostgreSQL Tools Status')}
+                  </CardTitle>
+                  <CardDescription>
+                    {t('admin.backup.tools.description', 'Required tools for backup and restore operations')}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {/* pg_dump */}
+                    <div className="flex items-center justify-between p-3 border rounded-lg">
+                      <div className="flex items-center gap-3">
+                        {toolsStatus.pg_dump?.available ? (
+                          <CheckCircle className="h-5 w-5 text-green-500" />
+                        ) : (
+                          <XCircle className="h-5 w-5 text-destructive" />
+                        )}
+                        <div>
+                          <p className="font-medium">pg_dump</p>
+                          <p className="text-sm text-muted-foreground">
+                            {t('admin.backup.tools.pg_dump_desc', 'Required for creating backups')}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        {toolsStatus.pg_dump?.available ? (
+                          <Badge variant="default">{toolsStatus.pg_dump.version}</Badge>
+                        ) : (
+                          <Badge variant="destructive">{t('admin.backup.tools.unavailable', 'Unavailable')}</Badge>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* psql */}
+                    <div className="flex items-center justify-between p-3 border rounded-lg">
+                      <div className="flex items-center gap-3">
+                        {toolsStatus.psql?.available ? (
+                          <CheckCircle className="h-5 w-5 text-green-500" />
+                        ) : (
+                          <XCircle className="h-5 w-5 text-destructive" />
+                        )}
+                        <div>
+                          <p className="font-medium">psql</p>
+                          <p className="text-sm text-muted-foreground">
+                            {t('admin.backup.tools.psql_desc', 'Required for restoring SQL backups')}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        {toolsStatus.psql?.available ? (
+                          <Badge variant="default">{toolsStatus.psql.version}</Badge>
+                        ) : (
+                          <Badge variant="destructive">{t('admin.backup.tools.unavailable', 'Unavailable')}</Badge>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* pg_restore */}
+                    <div className="flex items-center justify-between p-3 border rounded-lg">
+                      <div className="flex items-center gap-3">
+                        {toolsStatus.pg_restore?.available ? (
+                          <CheckCircle className="h-5 w-5 text-green-500" />
+                        ) : (
+                          (() => {
+
+                            const hasCustomFormatBackups = backups?.some(b => {
+                              const fname = b.filename.toLowerCase();
+                              return fname.endsWith('.backup') || fname.endsWith('.dump') || fname.endsWith('.bak');
+                            });
+                            return hasCustomFormatBackups ? (
+                              <XCircle className="h-5 w-5 text-destructive" />
+                            ) : (
+                              <AlertCircle className="h-5 w-5 text-yellow-500" />
+                            );
+                          })()
+                        )}
+                        <div>
+                          <p className="font-medium">pg_restore</p>
+                          <p className="text-sm text-muted-foreground">
+                            {(() => {
+                              const hasCustomFormatBackups = backups?.some(b => {
+                                const fname = b.filename.toLowerCase();
+                                return fname.endsWith('.backup') || fname.endsWith('.dump') || fname.endsWith('.bak');
+                              });
+                              return hasCustomFormatBackups
+                                ? t('admin.backup.tools.pg_restore_desc_required', 'Required for restoring custom format backups (.backup, .dump, .bak)')
+                                : t('admin.backup.tools.pg_restore_desc_optional', 'Optional - only needed for custom format backups (.backup, .dump, .bak)');
+                            })()}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        {toolsStatus.pg_restore?.available ? (
+                          <Badge variant="default">{toolsStatus.pg_restore.version}</Badge>
+                        ) : (
+                          (() => {
+                            const hasCustomFormatBackups = backups?.some(b => {
+                              const fname = b.filename.toLowerCase();
+                              return fname.endsWith('.backup') || fname.endsWith('.dump') || fname.endsWith('.bak');
+                            });
+                            return hasCustomFormatBackups ? (
+                              <Badge variant="destructive">{t('admin.backup.tools.required', 'Required')}</Badge>
+                            ) : (
+                              <Badge variant="secondary">{t('admin.backup.tools.optional', 'Optional')}</Badge>
+                            );
+                          })()
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
+
           <Card>
             <CardHeader>
               <CardTitle>{t('admin.backup.quick_actions.title', 'Quick Actions')}</CardTitle>
@@ -1040,6 +1543,145 @@ export default function BackupManagement() {
                     {t('admin.backup.actions.create_backup', 'Create Backup')}
                   </Button>
                 </div>
+              </div>
+
+              <Separator />
+
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="text-sm font-medium">{t('admin.backup.cleanup.title', 'Backup Cleanup')}</h4>
+                    {lastCleanup && (
+                      <Badge variant={lastCleanup.status === 'success' ? 'default' : 'destructive'} className="text-xs">
+                        {lastCleanup.status === 'success'
+                          ? t('admin.backup.cleanup.last_success', 'Last: ') + new Date(lastCleanup.timestamp).toLocaleDateString()
+                          : t('admin.backup.cleanup.last_failed', 'Last failed')}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {t('admin.backup.cleanup.description', `Remove backups older than ${config?.retention_days || 30} days`)}
+                  </p>
+                </div>
+                <Button
+                  onClick={() => cleanupBackupsMutation.mutate()}
+                  disabled={cleanupBackupsMutation.isPending}
+                  variant="outline"
+                  size="sm"
+                >
+                  {cleanupBackupsMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 mr-2" />
+                  )}
+                  {t('admin.backup.actions.cleanup_now', 'Cleanup Now')}
+                </Button>
+              </div>
+
+              <Separator />
+
+              {/* Backup Logs Section */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium">{t('admin.backup.logs.title', 'Activity Logs')}</h4>
+                  <div className="text-xs text-muted-foreground">
+                    {backupLogs && `${t('admin.backup.logs.showing', 'Showing')} ${backupLogs.logs.length} ${t('admin.backup.logs.of', 'of')} ${backupLogs.total}`}
+                  </div>
+                </div>
+
+                {backupLogs && backupLogs.logs.length > 0 ? (
+                  <>
+                    <div className="border rounded-lg overflow-hidden">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>{t('admin.backup.logs.timestamp', 'Timestamp')}</TableHead>
+                            <TableHead>{t('admin.backup.logs.schedule', 'Schedule')}</TableHead>
+                            <TableHead>{t('admin.backup.logs.status', 'Status')}</TableHead>
+                            <TableHead>{t('admin.backup.logs.details', 'Details')}</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {backupLogs.logs.map((log) => (
+                            <TableRow key={log.id}>
+                              <TableCell className="text-sm">
+                                {formatDate(log.timestamp)}
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                {log.scheduleId === 'manual' ? (
+                                  <Badge variant="outline" className="text-xs">
+                                    {t('admin.backup.logs.manual', 'Manual')}
+                                  </Badge>
+                                ) : log.scheduleId === 'restore' ? (
+                                  <Badge variant="outline" className="text-xs">
+                                    {t('admin.backup.logs.restore', 'Restore')}
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-xs">
+                                    {log.scheduleId}
+                                  </Badge>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <Badge
+                                  variant={
+                                    log.status === 'success' ? 'default' :
+                                    log.status === 'failed' ? 'destructive' :
+                                    log.status === 'in_progress' ? 'secondary' :
+                                    'outline'
+                                  }
+                                  className="text-xs"
+                                >
+                                  {log.status}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                {log.errorMessage ? (
+                                  <span className="text-destructive">{log.errorMessage}</span>
+                                ) : log.metadata?.event_type ? (
+                                  <span className="text-muted-foreground">{log.metadata.event_type}</span>
+                                ) : (
+                                  <span className="text-muted-foreground">-</span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+
+                    {/* Pagination Controls */}
+                    {backupLogs.total > logsPageSize && (
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-muted-foreground">
+                          {t('admin.backup.logs.page', 'Page')} {logsPage + 1} {t('admin.backup.logs.of', 'of')} {Math.ceil(backupLogs.total / logsPageSize)}
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setLogsPage(Math.max(0, logsPage - 1))}
+                            disabled={logsPage === 0}
+                          >
+                            {t('admin.backup.logs.previous', 'Previous')}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setLogsPage(logsPage + 1)}
+                            disabled={(logsPage + 1) * logsPageSize >= backupLogs.total}
+                          >
+                            {t('admin.backup.logs.next', 'Next')}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-center py-8 text-muted-foreground">
+                    {t('admin.backup.logs.no_logs', 'No activity logs available')}
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -1126,17 +1768,45 @@ export default function BackupManagement() {
                               size="sm"
                               variant="outline"
                               onClick={() => verifyBackupMutation.mutate(backup.id)}
-                              disabled={verifyBackupMutation.isPending || backup.status !== 'completed'}
-                              title={t('admin.backup.actions.verify_backup', 'Verify backup integrity')}
+                              disabled={
+                                verifyBackupMutation.isPending ||
+                                backup.status !== 'completed' ||
+                                (backup.filename.toLowerCase().endsWith('.backup') || backup.filename.toLowerCase().endsWith('.dump') || backup.filename.toLowerCase().endsWith('.bak') ? !isRestoreToolAvailable(backup) : false)
+                              }
+                              title={
+                                backup.filename.toLowerCase().endsWith('.backup') || backup.filename.toLowerCase().endsWith('.dump') || backup.filename.toLowerCase().endsWith('.bak')
+                                  ? !isRestoreToolAvailable(backup)
+                                    ? getRestoreToolRequirement(backup)
+                                    : t('admin.backup.actions.verify_backup', 'Verify backup integrity')
+                                  : t('admin.backup.actions.verify_backup', 'Verify backup integrity')
+                              }
                             >
                               <Shield className="h-4 w-4" />
                             </Button>
                             <Button
                               size="sm"
                               variant="outline"
+                              onClick={() => verifyDeepBackupMutation.mutate(backup.id)}
+                              disabled={verifyDeepBackupMutation.isPending || backup.status !== 'completed' || !isRestoreToolAvailable(backup)}
+                              title={!isRestoreToolAvailable(backup)
+                                ? getRestoreToolRequirement(backup)
+                                : t('admin.backup.actions.verify_deep_backup', 'Deep verify - test actual restore to temporary database')}
+                              className="text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                            >
+                              {verifyDeepBackupMutation.isPending ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <ShieldCheck className="h-4 w-4" />
+                              )}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
                               onClick={() => openRestoreDialog(backup)}
-                              disabled={isRestoreDisabled(backup) || restoreBackupMutation.isPending}
-                              title={t('admin.backup.actions.restore_backup', 'Restore database from this backup')}
+                              disabled={isRestoreDisabled(backup) || restoreBackupMutation.isPending || !isRestoreToolAvailable(backup)}
+                              title={!isRestoreToolAvailable(backup)
+                                ? getRestoreToolRequirement(backup)
+                                : t('admin.backup.actions.restore_backup', 'Restore database from this backup')}
                               className="text-orange-600 hover:text-orange-700 hover:bg-orange-50"
                             >
                               <RotateCcw className="h-4 w-4" />
@@ -1816,6 +2486,7 @@ export default function BackupManagement() {
               {t('admin.backup.restore.title', 'Database Restoration')}
             </DialogTitle>
             <DialogDescription>
+              {restoreStep === 'preflight' && t('admin.backup.restore.preflight_step', 'Running system checks before restore')}
               {restoreStep === 'warning' && t('admin.backup.restore.warning_step', 'Review the backup details and understand the implications')}
               {restoreStep === 'confirmation' && t('admin.backup.restore.confirmation_step', 'Confirm your intention to restore the database')}
               {restoreStep === 'progress' && t('admin.backup.restore.progress_step', 'Database restoration in progress')}
@@ -1870,6 +2541,68 @@ export default function BackupManagement() {
                   </div>
                 </CardContent>
               </Card>
+
+              {restoreStep === 'preflight' && (
+                <div className="space-y-4">
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <div className="flex items-start gap-3">
+                      <AlertCircle className="h-5 w-5 text-blue-600 mt-0.5 flex-shrink-0" />
+                      <div className="w-full">
+                        <h4 className="font-medium text-blue-800 mb-3">{t('admin.backup.restore.preflight_title', 'System Readiness Checks')}</h4>
+
+                        {preflightChecksMutation.isPending && (
+                          <div className="flex items-center gap-2 text-sm text-blue-700">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            {t('admin.backup.restore.preflight_running', 'Running preflight checks...')}
+                          </div>
+                        )}
+
+                        {preflightChecks && (
+                          <div className="space-y-2">
+                            {preflightChecks.checks.map((check, index) => (
+                              <div key={index} className="flex items-start gap-2 text-sm">
+                                {check.status === 'passed' && (
+                                  <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
+                                )}
+                                {check.status === 'failed' && (
+                                  <XCircle className="h-4 w-4 text-red-600 mt-0.5 flex-shrink-0" />
+                                )}
+                                {check.status === 'warning' && (
+                                  <AlertTriangle className="h-4 w-4 text-yellow-600 mt-0.5 flex-shrink-0" />
+                                )}
+                                <div className="flex-1">
+                                  <div className={`font-medium ${
+                                    check.status === 'passed' ? 'text-green-800' :
+                                    check.status === 'failed' ? 'text-red-800' :
+                                    'text-yellow-800'
+                                  }`}>
+                                    {check.name}
+                                  </div>
+                                  <div className={`text-xs ${
+                                    check.status === 'passed' ? 'text-green-700' :
+                                    check.status === 'failed' ? 'text-red-700' :
+                                    'text-yellow-700'
+                                  }`}>
+                                    {check.message}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {preflightChecks && !preflightChecks.canProceed && (
+                          <div className="mt-4 bg-red-50 border border-red-200 rounded p-3">
+                            <p className="text-sm text-red-800 font-medium">
+                              {t('admin.backup.restore.preflight_failed', 'Critical checks failed. Please resolve the issues before proceeding.')}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {restoreStep === 'warning' && (
                 <div className="space-y-4">
@@ -1942,17 +2675,34 @@ export default function BackupManagement() {
 
               {restoreStep === 'progress' && (
                 <div className="space-y-4">
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                    <div className="flex items-center gap-3">
-                      <Loader2 className="h-5 w-5 text-blue-600 animate-spin flex-shrink-0" />
-                      <div>
-                        <h4 className="font-medium text-blue-800">{t('admin.backup.restore.progress_title', 'Restoration in Progress')}</h4>
-                        <p className="text-sm text-blue-700">
-                          {restoreProgress?.message || t('admin.backup.restore.progress_processing', 'Processing...')}
-                        </p>
+                  {restoreProgress?.status !== 'completed' && restoreProgress?.status !== 'failed' && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          <Loader2 className="h-5 w-5 text-blue-600 animate-spin flex-shrink-0" />
+                          <div className="flex-1">
+                            <h4 className="font-medium text-blue-800">{t('admin.backup.restore.progress_title', 'Restoration in Progress')}</h4>
+                            <p className="text-sm text-blue-700">
+                              {restoreProgress?.message || t('admin.backup.restore.progress_processing', 'Processing...')}
+                            </p>
+                          </div>
+                          {restoreProgress?.percent !== undefined && (
+                            <div className="text-sm font-medium text-blue-800">
+                              {restoreProgress.percent}%
+                            </div>
+                          )}
+                        </div>
+                        {restoreProgress?.percent !== undefined && (
+                          <div className="w-full bg-blue-200 rounded-full h-2">
+                            <div
+                              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                              style={{ width: `${restoreProgress.percent}%` }}
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
-                  </div>
+                  )}
 
                   {restoreProgress?.status === 'completed' && (
                     <div className="bg-green-50 border border-green-200 rounded-lg p-4">
@@ -1961,7 +2711,7 @@ export default function BackupManagement() {
                         <div>
                           <h4 className="font-medium text-green-800">{t('admin.backup.restore.completed_title', 'Restoration Completed')}</h4>
                           <p className="text-sm text-green-700">
-                            {t('admin.backup.restore.completed_message', 'Database has been successfully restored. The dialog will close automatically.')}
+                            {restoreProgress?.message || t('admin.backup.restore.completed_message', 'Database has been successfully restored. The dialog will close automatically.')}
                           </p>
                         </div>
                       </div>
@@ -1987,7 +2737,7 @@ export default function BackupManagement() {
           )}
 
           <DialogFooter>
-            {restoreStep === 'warning' && (
+            {restoreStep === 'preflight' && (
               <>
                 <Button
                   variant="outline"
@@ -1997,6 +2747,27 @@ export default function BackupManagement() {
                   }}
                 >
                   {t('admin.backup.restore.cancel', 'Cancel')}
+                </Button>
+                <Button
+                  onClick={() => setRestoreStep('warning')}
+                  disabled={!preflightChecks || !preflightChecks.canProceed || preflightChecksMutation.isPending}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  {preflightChecksMutation.isPending && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  {t('admin.backup.restore.continue', 'Continue')}
+                </Button>
+              </>
+            )}
+
+            {restoreStep === 'warning' && (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => setRestoreStep('preflight')}
+                >
+                  {t('admin.backup.restore.back', 'Back')}
                 </Button>
                 <Button
                   onClick={() => setRestoreStep('confirmation')}
@@ -2238,20 +3009,59 @@ export default function BackupManagement() {
           </DialogHeader>
 
           <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{t('admin.backup.upload.file_label', 'Backup File')}</Label>
-              <FileUpload
-                onFileSelected={handleFileSelected}
-                fileType=".sql,.backup,.dump,.bak"
-                maxSize={500} // 500MB limit
-                className="w-full"
-                showProgress={isUploading}
-                progress={uploadProgress}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t('admin.backup.upload.file_help', 'Maximum file size: 500MB. Supported formats: .sql, .backup, .dump, .bak')}
-              </p>
-            </div>
+            <Tabs value={uploadMethod} onValueChange={(value) => setUploadMethod(value as 'file' | 'url')}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="file" disabled={isUploading}>
+                  {t('admin.backup.upload.local_file', 'Local File')}
+                </TabsTrigger>
+                <TabsTrigger value="url" disabled={isUploading}>
+                  {t('admin.backup.upload.from_url', 'From URL')}
+                </TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="file" className="space-y-2 mt-4">
+                <Label>{t('admin.backup.upload.file_label', 'Backup File')}</Label>
+                <FileUpload
+                  onFileSelected={handleFileSelected}
+                  fileType=".sql,.backup,.dump,.bak"
+                  maxSize={3000} // 3000MB limit
+                  className="w-full"
+                  showProgress={isUploading}
+                  progress={uploadProgress}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t('admin.backup.upload.file_help', 'Maximum file size: 3000MB. Supported formats: .sql, .backup, .dump, .bak')}
+                </p>
+              </TabsContent>
+
+              <TabsContent value="url" className="space-y-2 mt-4">
+                <Label htmlFor="backup-url">{t('admin.backup.upload.url_label', 'Backup File URL')}</Label>
+                <Input
+                  id="backup-url"
+                  type="url"
+                  placeholder="https://example.com/backup.sql"
+                  value={uploadForm.url}
+                  onChange={(e) => handleUrlChange(e.target.value)}
+                  disabled={isUploading || isValidatingUrl}
+                  className={urlValidationError ? 'border-red-500' : ''}
+                />
+                {urlValidationError && (
+                  <div className="flex items-start gap-2 text-sm text-red-600">
+                    <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                    <span>{urlValidationError}</span>
+                  </div>
+                )}
+                {isValidatingUrl && (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>{t('admin.backup.upload.validating_url', 'Validating URL...')}</span>
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {t('admin.backup.upload.url_help', 'Enter the direct URL to a backup file. The file will be downloaded and validated before upload.')}
+                </p>
+              </TabsContent>
+            </Tabs>
 
             <div className="space-y-2">
               <Label htmlFor="upload-description">{t('admin.backup.upload.description_label', 'Description (Optional)')}</Label>
@@ -2328,23 +3138,44 @@ export default function BackupManagement() {
                 setUploadDialogOpen(false);
                 resetUploadForm();
               }}
-              disabled={isUploading}
+              disabled={isUploading || isValidatingUrl}
             >
               {t('common.cancel', 'Cancel')}
             </Button>
             <Button
               onClick={handleUploadSubmit}
-              disabled={!uploadForm.file || uploadForm.storage_locations.length === 0 || isUploading}
+              disabled={
+                uploadForm.storage_locations.length === 0 ||
+                isUploading ||
+                isValidatingUrl ||
+                (uploadMethod === 'file' && !uploadForm.file) ||
+                (uploadMethod === 'url' && (!uploadForm.url.trim() || !!urlValidationError))
+              }
             >
               {isUploading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {t('admin.backup.upload.uploading', 'Uploading...')}
+                  {uploadMethod === 'url'
+                    ? t('admin.backup.upload.downloading', 'Downloading & Uploading...')
+                    : t('admin.backup.upload.uploading', 'Uploading...')
+                  }
+                </>
+              ) : isValidatingUrl ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {t('admin.backup.upload.validating', 'Validating...')}
                 </>
               ) : (
                 <>
-                  <Upload className="mr-2 h-4 w-4" />
-                  {t('admin.backup.upload.upload_button', 'Upload Backup')}
+                  {uploadMethod === 'url' ? (
+                    <Download className="mr-2 h-4 w-4" />
+                  ) : (
+                    <Upload className="mr-2 h-4 w-4" />
+                  )}
+                  {uploadMethod === 'url'
+                    ? t('admin.backup.upload.download_upload_button', 'Download & Upload')
+                    : t('admin.backup.upload.upload_button', 'Upload Backup')
+                  }
                 </>
               )}
             </Button>

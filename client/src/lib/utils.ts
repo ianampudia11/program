@@ -45,11 +45,33 @@ export function findChannelConnectionForContact(
   return undefined;
 }
 
+/**
+ * Formats a number as currency using the specified currency code.
+ * 
+ * @param amount - The amount to format
+ * @param currency - The currency code (ISO 4217), defaults to 'USD'
+ * @returns Formatted currency string
+ * 
+ * @remarks
+ * Components should prefer using the `useCurrency` hook from `@/contexts/currency-context`
+ * instead of calling this function directly, as it will automatically use the configured
+ * default currency from general settings.
+ */
 export function formatCurrency(amount: number, currency: string = 'USD'): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: currency,
-  }).format(amount);
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+    }).format(amount);
+  } catch (error) {
+
+    if (error instanceof RangeError) {
+
+      return `${currency} ${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    throw error;
+  }
 }
 
 export function formatDate(dateString: string): string {

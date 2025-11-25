@@ -124,6 +124,13 @@ const PERMISSION_GROUPS = {
       manage_calendar: 'Manage Calendar'
     }
   },
+  tasks: {
+    title: 'Task Management',
+    permissions: {
+      view_tasks: 'View Tasks',
+      manage_tasks: 'Manage Tasks'
+    }
+  },
   pages: {
     title: 'Page Management',
     permissions: {
@@ -224,6 +231,13 @@ export function RolesAndPermissions() {
       permissions: {
         view_calendar: t('roles.view_calendar', 'View Calendar'),
         manage_calendar: t('roles.manage_calendar', 'Manage Calendar')
+      }
+    },
+    tasks: {
+      title: t('roles.task_management', 'Task Management'),
+      permissions: {
+        view_tasks: t('roles.view_tasks', 'View Tasks'),
+        manage_tasks: t('roles.manage_tasks', 'Manage Tasks')
       }
     },
     pages: {

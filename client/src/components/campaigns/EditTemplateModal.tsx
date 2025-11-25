@@ -28,7 +28,11 @@ import {
   Upload,
   X,
   Loader2,
-  AlertTriangle
+  AlertTriangle,
+  Image,
+  Video,
+  Music,
+  File
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useTranslation } from '@/hooks/use-translation';
@@ -234,6 +238,110 @@ export function EditTemplateModal({ isOpen, onClose, templateId, onTemplateUpdat
     setMediaFiles(prev => prev.filter(file => file.id !== fileId));
   };
 
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        toast({
+          title: t('common.error', 'Error'),
+          description: t('templates.edit.file_too_large', `File ${file.name} is too large. Maximum size is 10MB.`),
+          variant: 'destructive'
+        });
+        continue;
+      }
+
+      const fileType = getFileType(file);
+      const fileId = `new-${Date.now()}-${Math.random()}`;
+
+
+      try {
+        setUploadProgress(prev => ({ ...prev, [fileId]: 0 }));
+
+        const formData = new FormData();
+        formData.append('media', file);
+
+        const response = await fetch('/api/templates/upload-media', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `Upload failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success && data.url) {
+          const newMediaFile: MediaFile = {
+            id: fileId,
+            file,
+            type: fileType,
+            url: data.url,
+            name: file.name,
+            size: file.size
+          };
+
+          setMediaFiles(prev => [...prev, newMediaFile]);
+          setUploadProgress(prev => {
+            const updated = { ...prev };
+            delete updated[fileId];
+            return updated;
+          });
+
+          toast({
+            title: t('common.success', 'Success'),
+            description: t('templates.edit.file_uploaded', `${file.name} uploaded successfully`)
+          });
+        } else {
+          throw new Error(data.error || 'Upload failed');
+        }
+      } catch (error) {
+        console.error('Upload error:', error);
+        toast({
+          title: t('common.error', 'Error'),
+          description: t('templates.edit.upload_failed', `Failed to upload ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`),
+          variant: 'destructive'
+        });
+        setUploadProgress(prev => {
+          const updated = { ...prev };
+          delete updated[fileId];
+          return updated;
+        });
+      }
+    }
+
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const getFileType = (file: File): 'image' | 'video' | 'audio' | 'document' => {
+    const type = file.type.toLowerCase();
+    if (type.startsWith('image/')) return 'image';
+    if (type.startsWith('video/')) return 'video';
+    if (type.startsWith('audio/')) return 'audio';
+    return 'document';
+  };
+
+  const getFileIcon = (type: 'image' | 'video' | 'audio' | 'document') => {
+    switch (type) {
+      case 'image':
+        return <Image className="w-4 h-4 text-blue-500" />;
+      case 'video':
+        return <Video className="w-4 h-4 text-purple-500" />;
+      case 'audio':
+        return <Music className="w-4 h-4 text-green-500" />;
+      case 'document':
+        return <File className="w-4 h-4 text-gray-500" />;
+    }
+  };
+
   if (isLoadingTemplate) {
     return (
       <Dialog open={isOpen} onOpenChange={onClose}>
@@ -323,28 +431,76 @@ export function EditTemplateModal({ isOpen, onClose, templateId, onTemplateUpdat
                   />
                 </div>
               </div>
+            </div>
+
+            <Separator />
+
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <Label>{t('templates.edit.media_files_label', 'Media Files (Optional)')}</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center gap-2"
+                  disabled={isLoading || Object.keys(uploadProgress).length > 0}
+                >
+                  <Upload className="w-4 h-4" />
+                  {t('templates.edit.add_media', 'Add Media')}
+                </Button>
+              </div>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+
+              {Object.keys(uploadProgress).length > 0 && (
+                <div className="space-y-2">
+                  {Object.entries(uploadProgress).map(([fileId, progress]) => (
+                    <div key={fileId} className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">
+                        {t('templates.edit.uploading', 'Uploading...')} {progress}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {mediaFiles.length > 0 && (
                 <div className="space-y-2">
-                  <Label>{t('templates.edit.attached_media', 'Attached Media')}</Label>
                   <div className="grid grid-cols-2 gap-2">
                     {mediaFiles.map((file) => (
-                      <div key={file.id} className="relative border rounded-lg p-2">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <Badge variant="secondary" className="text-xs">
-                              {file.type}
-                            </Badge>
-                            <span className="text-sm truncate">{file.name}</span>
+                      <div key={file.id} className="relative border rounded-lg p-3">
+                        <div className="flex items-center gap-2">
+                          {getFileIcon(file.type)}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{file.name}</p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <Badge variant="secondary" className="text-xs">
+                                {file.type}
+                              </Badge>
+                              {file.size > 0 && (
+                                <span className="text-xs text-muted-foreground">
+                                  {(file.size / 1024 / 1024).toFixed(2)} MB
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <Button
                             type="button"
                             variant="ghost"
                             size="sm"
                             onClick={() => removeMediaFile(file.id)}
-                            className="h-6 w-6 p-0"
+                            className="h-8 w-8 p-0 shrink-0"
                           >
-                            <X className="h-3 w-3" />
+                            <X className="h-4 w-4" />
                           </Button>
                         </div>
                       </div>

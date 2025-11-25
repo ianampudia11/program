@@ -5,7 +5,7 @@ import { usePlans } from "@/hooks/use-plans";
 import useSocket from "@/hooks/useSocket";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Loader2, Plus, Search, Info, LogIn, Trash2, RefreshCw, Database } from "lucide-react";
+import { Loader2, Plus, Search, Info, LogIn, Trash2, RefreshCw, Database, CheckSquare, Square } from "lucide-react";
 import AdminLayout from "@/components/admin/AdminLayout";
 import { apiRequest } from "@/lib/queryClient";
 import { Input } from "@/components/ui/input";
@@ -19,6 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useState } from "react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -35,6 +36,7 @@ import {
 import { CompanyDeletionDialog } from "@/components/admin/CompanyDeletionDialog";
 import { CompanyDataClearDialog } from "@/components/admin/CompanyDataClearDialog";
 import { getPlanBillingPeriod } from "@/utils/plan-duration";
+import { useCurrency } from "@/contexts/currency-context";
 
 interface Company {
   id: number;
@@ -62,6 +64,7 @@ function getCompanyInitials(name: string): string {
 export default function CompaniesPage() {
   const { user, isLoading, impersonateCompanyMutation } = useAuth();
   const { plans, isLoading: isLoadingPlans } = usePlans();
+  const { formatCurrency } = useCurrency();
   const { onMessage } = useSocket('/ws');
   const [searchTerm, setSearchTerm] = useState("");
   const [companyToImpersonate, setCompanyToImpersonate] = useState<Company | null>(null);
@@ -69,6 +72,10 @@ export default function CompaniesPage() {
   const [showDeletionDialog, setShowDeletionDialog] = useState(false);
   const [companyToClearData, setCompanyToClearData] = useState<Company | null>(null);
   const [showDataClearDialog, setShowDataClearDialog] = useState(false);
+  
+
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<number>>(new Set());
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
 
   useEffect(() => {
     if (!isLoading && user && !user.isSuperAdmin) {
@@ -174,6 +181,74 @@ export default function CompaniesPage() {
     setCompanyToClearData(null);
   };
 
+
+  const toggleCompanySelection = (companyId: number) => {
+    setSelectedCompanies(prev => {
+      const newSet = new Set(prev);
+      const numericId = Number(companyId);
+      if (newSet.has(numericId)) {
+        newSet.delete(numericId);
+      } else {
+        newSet.add(numericId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedCompanies.size === filteredCompanies?.length) {
+      setSelectedCompanies(new Set());
+    } else {
+      const allIds = new Set(filteredCompanies?.map(company => Number(company.id)) || []);
+      setSelectedCompanies(allIds);
+    }
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedCompanies.size > 0) {
+      setShowBulkDeleteDialog(true);
+    }
+  };
+
+  const confirmBulkDelete = async () => {
+    if (selectedCompanies.size === 0) return;
+
+    try {
+      const companyIds = Array.from(selectedCompanies);
+    
+      
+      const response = await apiRequest('DELETE', '/api/admin/companies/bulk', {
+        companyIds
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        
+        setSelectedCompanies(new Set());
+        setShowBulkDeleteDialog(false);
+        refetchCompanies();
+        
+
+        if (result.successCount > 0) {
+          alert(`Successfully deleted ${result.successCount} companies${result.failureCount > 0 ? `, ${result.failureCount} failed` : ''}`);
+        } else {
+          alert('No companies were deleted. Please check the server logs for details.');
+        }
+      } else {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || 'Failed to delete companies');
+      }
+    } catch (error) {
+      console.error('Error deleting companies:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      alert(`Failed to delete companies: ${errorMessage}`);
+    }
+  };
+
+  const handleBulkDeleteClose = () => {
+    setShowBulkDeleteDialog(false);
+  };
+
   const filteredCompanies = companies?.filter(company =>
     company.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     company.slug.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -198,6 +273,16 @@ export default function CompaniesPage() {
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-2xl">Companies</h1>
           <div className="flex gap-2">
+            {selectedCompanies.size > 0 && (
+              <Button
+                onClick={handleBulkDelete}
+                variant="destructive"
+                className="bg-red-600 hover:bg-red-700"
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete Selected ({selectedCompanies.size})
+              </Button>
+            )}
             <Button
               onClick={() => refetchCompanies()}
               variant="outline"
@@ -250,6 +335,13 @@ export default function CompaniesPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-12">
+                        <Checkbox
+                          checked={selectedCompanies.size === filteredCompanies?.length && filteredCompanies?.length > 0}
+                          onCheckedChange={toggleSelectAll}
+                          className="data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                        />
+                      </TableHead>
                       <TableHead>Company</TableHead>
                       <TableHead>Slug</TableHead>
                       <TableHead>Plan</TableHead>
@@ -261,6 +353,13 @@ export default function CompaniesPage() {
                   <TableBody>
                     {filteredCompanies?.map((company) => (
                       <TableRow key={company.id}>
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedCompanies.has(Number(company.id))}
+                            onCheckedChange={() => toggleCompanySelection(Number(company.id))}
+                            className="data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                          />
+                        </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-3">
                             <Avatar className="h-8 w-8">
@@ -301,7 +400,7 @@ export default function CompaniesPage() {
                                       <p className="font-semibold">{getPlanDetails(company)?.name || company.plan}</p>
                                       <p>{getPlanDetails(company)?.description || "No description available"}</p>
                                       <div className="mt-1 pt-1 border-t border-border">
-                                        <p><span className="font-medium">Price:</span> ${getPlanDetails(company)?.price || 0}{getPlanBillingPeriod(getPlanDetails(company) || {})}</p>
+                                        <p><span className="font-medium">Price:</span> {formatCurrency(getPlanDetails(company)?.price || 0)}{getPlanBillingPeriod(getPlanDetails(company) || {})}</p>
                                         <p><span className="font-medium">Max Users:</span> {getPlanDetails(company)?.maxUsers || company.maxUsers}</p>
                                         <p><span className="font-medium">Max Contacts:</span> {getPlanDetails(company)?.maxContacts?.toLocaleString() || "N/A"}</p>
                                         <p><span className="font-medium">Max Channels:</span> {getPlanDetails(company)?.maxChannels || "N/A"}</p>
@@ -422,6 +521,32 @@ export default function CompaniesPage() {
           companyName={companyToClearData?.name || ''}
           onSuccess={handleDataClearSuccess}
         />
+
+        {/* Bulk Delete Confirmation Dialog */}
+        <AlertDialog
+          open={showBulkDeleteDialog}
+          onOpenChange={(open) => !open && handleBulkDeleteClose()}
+        >
+          <AlertDialogContent className="max-w-md">
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Multiple Companies</AlertDialogTitle>
+              <AlertDialogDescription>
+                You are about to delete {selectedCompanies.size} companies and all their associated data. 
+                This action cannot be undone. Are you sure you want to continue?
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="mt-4">
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction 
+                className="bg-red-600 hover:bg-red-700"
+                onClick={confirmBulkDelete}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete {selectedCompanies.size} Companies
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </AdminLayout>
   );

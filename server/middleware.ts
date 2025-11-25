@@ -5,6 +5,8 @@ import { planLimitsService } from "./services/plan-limits-service";
 
 
 export { ensureActiveSubscription, apiSubscriptionGuard, subscriptionWarning } from './middleware/subscription-guard';
+import { ensureLicenseValid } from './middleware/license-guard';
+export { ensureLicenseValid };
 
 export const ensureAuthenticated = (req: Request, res: Response, next: NextFunction) => {
   if (req.isAuthenticated()) {
@@ -14,23 +16,29 @@ export const ensureAuthenticated = (req: Request, res: Response, next: NextFunct
 };
 
 export const ensureSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ message: 'Unauthorized' });
-  }
+  ensureLicenseValid(req, res, (err?: any) => {
+    if (err) {
+      return next(err);
+    }
+    
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
 
-  const user = req.user as SelectUser;
+    const user = req.user as SelectUser;
 
-  if (user.isSuperAdmin) {
-    return next();
-  }
+    if (user.isSuperAdmin) {
+      return next();
+    }
 
-  const session = req.session as any;
-  if (session?.impersonation?.originalUserId) {
-    (req as any).isImpersonating = true;
-    (req as any).originalUserId = session.impersonation.originalUserId;
-    return next();
-  }
-  res.status(403).json({ message: 'Super admin access required' });
+    const session = req.session as any;
+    if (session?.impersonation?.originalUserId) {
+      (req as any).isImpersonating = true;
+      (req as any).originalUserId = session.impersonation.originalUserId;
+      return next();
+    }
+    res.status(403).json({ message: 'Super admin access required' });
+  });
 };
 
 export const ensureAdmin = (req: Request, res: Response, next: NextFunction) => {

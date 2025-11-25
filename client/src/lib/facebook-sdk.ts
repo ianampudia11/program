@@ -55,21 +55,52 @@ interface WhatsAppSignupData {
  * @param version Graph API version (e.g., 'v22.0')
  */
 export function initFacebookSDK(appId: string, version = 'v22.0'): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+
     if (document.getElementById('facebook-jssdk')) {
-      resolve();
+
+      if (window.FB) {
+        window.FB.init({
+          appId: appId,
+          cookie: true,
+          xfbml: true,
+          version: version
+        });
+      }
+      
+
+      setTimeout(() => {
+        if (window.FB && typeof window.FB.getLoginStatus === 'function') {
+          resolve();
+        } else {
+          setTimeout(() => {
+            if (window.FB && typeof window.FB.getLoginStatus === 'function') {
+              resolve();
+            } else {
+              reject(new Error('Facebook SDK failed to initialize properly'));
+            }
+          }, 1000);
+        }
+      }, 1000); // Always wait 1 second for internal initialization
       return;
     }
+
 
     window.fbAsyncInit = function() {
       window.FB.init({
         appId: appId,
-        autoLogAppEvents: true,
+        cookie: true,
         xfbml: true,
         version: version
       });
-      resolve();
+      
+
+
+      setTimeout(() => {
+        resolve();
+      }, 1000); // Wait 1 second for internal initialization
     };
+
 
     const script = document.createElement('script');
     script.id = 'facebook-jssdk';
@@ -77,6 +108,11 @@ export function initFacebookSDK(appId: string, version = 'v22.0'): Promise<void>
     script.async = true;
     script.defer = true;
     script.crossOrigin = 'anonymous';
+    
+    script.onerror = () => {
+      reject(new Error('Failed to load Facebook SDK'));
+    };
+    
     document.head.appendChild(script);
   });
 }
@@ -105,23 +141,48 @@ export function setupWhatsAppSignupListener(callback: (data: WhatsAppSignupData)
  * @param configId Your WhatsApp Business configuration ID
  * @param callback Callback function to handle the login response
  */
-export function launchWhatsAppSignup(
+export async function launchWhatsAppSignup(
   configId: string, 
   callback: (response: FacebookLoginResponse) => void
 ) {
   if (!window.FB) {
     console.error('Facebook SDK not initialized. Call initFacebookSDK first.');
-    return;
+    throw new Error('Facebook SDK not initialized. Please try again.');
   }
 
-  window.FB.login(callback, {
-    config_id: configId,
-    response_type: 'code',
-    override_default_response_type: true,
-    extras: {
-      setup: {},
-      featureType: '',
-      sessionInfoVersion: '3',
-    }
-  });
+  if (!configId || configId.trim() === '') {
+    console.error('WhatsApp Configuration ID is empty or invalid:', configId);
+    throw new Error('WhatsApp Configuration ID is required. Please check your configuration.');
+  }
+
+
+  if (window.location.protocol !== 'https:') {
+    console.error('Facebook SDK requires HTTPS. Current protocol:', window.location.protocol);
+    throw new Error('WhatsApp signup requires HTTPS. Please access this application over HTTPS (https://) instead of HTTP.');
+  }
+
+
+  if (!window.FB || typeof window.FB.login !== 'function') {
+    throw new Error('Facebook SDK is not properly initialized');
+  }
+
+
+  try {
+    window.FB.getLoginStatus(() => {
+
+      window.FB.login(callback, {
+        config_id: configId,
+        response_type: 'code',
+        override_default_response_type: true,
+        extras: {
+          setup: {},
+          featureType: '',
+          sessionInfoVersion: '3',
+        }
+      });
+    });
+  } catch (error) {
+    console.error('Error launching WhatsApp signup:', error);
+    throw new Error('Failed to launch WhatsApp signup. Please check your configuration.');
+  }
 }

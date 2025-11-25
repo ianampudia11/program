@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger';
 
 /**
- * BotHive AI Flow Knowledge Base
+ * PowerChat AI Flow Knowledge Base
  * Comprehensive knowledge system for AI assistant with detailed node information,
  * best practices, and flow patterns
  */

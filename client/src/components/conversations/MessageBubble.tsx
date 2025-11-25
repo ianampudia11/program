@@ -190,6 +190,23 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
   const { activeConversationId } = useConversations();
   
   const isInbound = message.direction === 'inbound';
+  
+
+  if (channelType === 'webchat') {
+    console.log('[WebChat Message Debug]', {
+      messageId: message.id,
+      direction: message.direction,
+      senderType: message.senderType,
+      content: message.content?.substring(0, 30),
+      isInbound,
+      sentAt: message.sentAt,
+      createdAt: message.createdAt,
+      metadataTimestamp: message.metadata?.timestamp,
+
+      sentAtMs: message.sentAt ? new Date(message.sentAt).getTime() : null,
+      createdAtMs: new Date(message.createdAt).getTime()
+    });
+  }
 
   const isFromBot = message.isFromBot === true;
   const timestamp = message.sentAt || 
@@ -263,16 +280,32 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
 
   const getMediaUrlFromMetadata = () => {
     if (!message.metadata) return null;
-    
+
     try {
-      const metadata = typeof message.metadata === 'string' 
-        ? JSON.parse(message.metadata) 
+      const metadata = typeof message.metadata === 'string'
+        ? JSON.parse(message.metadata)
         : message.metadata;
-      
+
       return metadata.mediaUrl || null;
     } catch (e) {
       return null;
     }
+  };
+
+
+  const getCacheBustedMediaUrl = (url: string | null): string | undefined => {
+    if (!url) return undefined;
+
+
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+
+
+
+    const timestamp = new Date(message.createdAt).getTime();
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}t=${timestamp}`;
   };
   
   const downloadMedia = async () => {
@@ -308,6 +341,13 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
       if (data.mediaUrl) {
         setLocalMediaUrl(data.mediaUrl);
 
+        const { updateMessageInCache } = require('@/hooks/useMessageCache');
+        if (updateMessageInCache) {
+          updateMessageInCache(message.id, { 
+            mediaUrl: data.mediaUrl,
+            mediaUrlFetchedAt: Date.now()
+          }).catch(console.error);
+        }
 
         if (!data.simulated) {
           await triggerFileDownload(data.mediaUrl, message);
@@ -660,10 +700,10 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
 
   const parsePollData = () => {
     try {
-      const metadata = typeof message.metadata === 'string'
-        ? JSON.parse(message.metadata)
+      const metadata = typeof message.metadata === 'string' 
+        ? JSON.parse(message.metadata) 
         : message.metadata || {};
-
+      
       return {
         pollContext: metadata.pollContext,
         pollVote: metadata.pollVote,
@@ -675,9 +715,105 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
     }
   };
 
+  const renderTemplateMessage = () => {
+    const displayContent = stripAgentSignature(message.content || '');
+    const metadata = typeof message.metadata === 'string' 
+      ? JSON.parse(message.metadata) 
+      : message.metadata || {};
+
+    const templateName = metadata.templateName || 'Template';
+    const templateComponents = metadata.templateComponents || [];
+    const headerImage = metadata.headerImage;
+    const headerVideo = metadata.headerVideo;
+    const headerDocument = metadata.headerDocument;
+
+
+    const canShowImage = !!headerImage;
+    const canShowVideo = !!headerVideo;
+    const canShowDocument = !!headerDocument;
+
+    return (
+      <div className="template-message">
+        {/* Template badge */}
+        <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-200">
+          <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+          <span className="text-xs font-medium text-gray-600">
+            {t('message_bubble.template_message', 'Template Message')}
+          </span>
+        </div>
+
+        {/* Header media */}
+        {canShowImage && (
+          <div className="mb-3">
+            <img 
+              src={headerImage} 
+              alt="Template header" 
+              className="rounded-lg max-w-full h-auto"
+              loading="lazy"
+            />
+          </div>
+        )}
+        {canShowVideo && (
+          <div className="mb-3">
+            <video 
+              src={headerVideo} 
+              controls 
+              className="rounded-lg max-w-full h-auto"
+            />
+          </div>
+        )}
+        {canShowDocument && (
+          <div className="mb-3 p-3 bg-gray-100 rounded-lg flex items-center gap-2">
+            <i className="ri-file-text-line text-xl text-gray-600"></i>
+            <div className="flex-1">
+              <p className="text-sm font-medium text-gray-800">
+                {metadata.documentFilename || 'Document'}
+              </p>
+              <a 
+                href={headerDocument} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-xs text-blue-600 hover:underline"
+              >
+                {t('message_bubble.view_document', 'View Document')}
+              </a>
+            </div>
+          </div>
+        )}
+
+        {/* Template content */}
+        <div className="whitespace-pre-wrap break-words">
+          {hasFormatting(displayContent) ? (
+            parseFormattedText(displayContent).map((node, index) => (
+              <span key={index}>{node}</span>
+            ))
+          ) : (
+            <p>{displayContent}</p>
+          )}
+        </div>
+
+        {/* Buttons (if any) */}
+        {metadata.buttons && metadata.buttons.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {metadata.buttons.map((button: any, index: number) => (
+              <div 
+                key={index}
+                className="p-2 border border-gray-300 rounded-lg text-center text-sm text-gray-700 bg-white"
+              >
+                {button.text || button.title || `Button ${index + 1}`}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderMessageContent = () => {
     const { type = 'text', content, channelType } = message;
-    const mediaUrl = message.mediaUrl || localMediaUrl || getMediaUrlFromMetadata();
+    const rawMediaUrl = message.mediaUrl || localMediaUrl || getMediaUrlFromMetadata();
+
+    const mediaUrl = getCacheBustedMediaUrl(rawMediaUrl);
 
 
     if (channelType === 'email' && (message.emailHtml || message.emailPlainText || message.emailSubject)) {
@@ -732,6 +868,11 @@ export default function MessageBubble({ message, contact, channelType, onReply, 
         displayContent={displayContent}
         isInbound={isInbound}
       />;
+    }
+
+
+    if (type === 'template') {
+      return renderTemplateMessage();
     }
 
 

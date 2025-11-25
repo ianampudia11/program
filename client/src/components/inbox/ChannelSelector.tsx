@@ -132,6 +132,10 @@ export function ChannelSelector({ activeChannelId, onChannelChange, className }:
         return 'Telegram';
       case 'email':
         return 'Email';
+      case 'twilio_sms':
+        return 'Twilio SMS';
+      case 'webchat':
+        return 'WebChat';
       default:
         return channelType;
     }
@@ -152,8 +156,12 @@ export function ChannelSelector({ activeChannelId, onChannelChange, className }:
         return <i className="ri-telegram-line" style={{ color: '#0088CC' }} />;
       case 'email':
         return <i className="ri-mail-line" style={{ color: '#6B7280' }} />;
+      case 'twilio_sms':
+        return <i className="ri-message-3-line" style={{ color: '#E4405F' }} />;
+      case 'webchat':
+        return <i className="ri-message-3-line" style={{ color: '#6366f1' }} />;
       default:
-        return <i className="ri-chat-1-line" style={{ color: '#333235' }} />;
+        return <i className="ri-message-3-line" style={{ color: '#333235' }} />;
     }
   };
 

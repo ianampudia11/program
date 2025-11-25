@@ -27,9 +27,10 @@ export function InboxSettings() {
   const { t } = useTranslation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { showGroupChats, updateGroupChatSetting, browserNotifications, updateBrowserNotificationSetting } = useConversations();
+  const { showGroupChats, updateGroupChatSetting, browserNotifications, updateBrowserNotificationSetting, agentSignatureEnabled, updateAgentSignatureSetting } = useConversations();
   const [isUpdating, setIsUpdating] = useState(false);
   const [isUpdatingNotifications, setIsUpdatingNotifications] = useState(false);
+  const [isUpdatingAgentSignature, setIsUpdatingAgentSignature] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState(getNotificationPermission());
   const { data: channelConnections } = useChannelConnections();
 
@@ -96,6 +97,17 @@ export function InboxSettings() {
     }
   };
 
+  const handleAgentSignatureToggle = async (enabled: boolean) => {
+    setIsUpdatingAgentSignature(true);
+    try {
+      await updateAgentSignatureSetting(enabled);
+    } catch (error) {
+      console.error('Error updating agent signature setting:', error);
+    } finally {
+      setIsUpdatingAgentSignature(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <Card>
@@ -131,32 +143,7 @@ export function InboxSettings() {
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <Label htmlFor="show-group-chats" className="text-base font-medium flex items-center gap-2">
-                  <Users className="h-4 w-4" />
-                  {t('settings.inbox.show_group_chats', 'Show Group Conversations')}
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('settings.inbox.show_group_chats_description', 'Display WhatsApp group conversations in the inbox alongside individual conversations')}
-                </p>
-              </div>
-              <Switch
-                id="show-group-chats"
-                checked={showGroupChats}
-                onCheckedChange={handleGroupChatToggle}
-                disabled={isUpdating}
-              />
-            </div>
-
-            {showGroupChats && (
-              <Alert>
-                <Info className="h-4 w-4" />
-                <AlertDescription>
-                  {t('settings.inbox.group_chats_enabled_info', 'Group conversations will appear in a separate section of your inbox. Bot flows and automation are disabled for group conversations to prevent spam.')}
-                </AlertDescription>
-              </Alert>
-            )}
+            
 
             {/* Browser Notifications Setting */}
             <div className="flex items-center justify-between">
@@ -226,6 +213,25 @@ export function InboxSettings() {
                 </div>
               </Alert>
             )}
+
+            {/* Agent Signature Setting */}
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <Label htmlFor="agent-signature" className="text-base font-medium flex items-center gap-2">
+                  <i className="ri-user-line text-base"></i>
+                  {t('settings.inbox.agent_signature', 'Agent Signature')}
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.inbox.agent_signature_description', 'Automatically add agent name to outbound messages')}
+                </p>
+              </div>
+              <Switch
+                id="agent-signature"
+                checked={agentSignatureEnabled}
+                onCheckedChange={handleAgentSignatureToggle}
+                disabled={isUpdatingAgentSignature}
+              />
+            </div>
           </div>
 
         </CardContent>

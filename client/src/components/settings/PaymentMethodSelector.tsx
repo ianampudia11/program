@@ -3,6 +3,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { PaymentMethod } from "@/hooks/use-payment-methods";
 import { Card, CardContent } from "@/components/ui/card";
+import { useCurrency } from "@/contexts/currency-context";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface PaymentMethodSelectorProps {
   paymentMethods: PaymentMethod[];
@@ -15,25 +17,77 @@ export function PaymentMethodSelector({
   selectedMethod,
   onSelectMethod
 }: PaymentMethodSelectorProps) {
+  const { currency } = useCurrency();
+
+  const isMethodAvailable = (methodId: string): boolean => {
+    if (methodId === 'mpesa') {
+      return currency === 'KES';
+    }
+    if (methodId === 'moyasar') {
+      return currency === 'SAR';
+    }
+    if (methodId === 'stripe') {
+      const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+      return supportedCurrencies.includes(currency.toUpperCase());
+    }
+    if (methodId === 'paypal') {
+      const supportedCurrencies = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'NZD', 'SEK', 'NOK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON', 'BGN', 'HRK', 'RUB', 'TRY', 'BRL', 'MXN', 'ARS', 'CLP', 'COP', 'PEN', 'INR', 'SGD', 'HKD', 'KRW', 'TWD', 'THB', 'MYR', 'PHP', 'IDR', 'VND', 'AED', 'SAR', 'ILS', 'ZAR', 'NGN', 'EGP', 'KES'];
+      return supportedCurrencies.includes(currency.toUpperCase());
+    }
+    if (methodId === 'mercadopago') {
+      const supportedCurrencies = ['USD', 'ARS', 'BRL', 'CLP', 'COP', 'MXN', 'PEN', 'UYU', 'VEF'];
+      return supportedCurrencies.includes(currency.toUpperCase());
+    }
+    return true; // bank-transfer and others are always available
+  };
+
+  const getUnavailableReason = (methodId: string): string | null => {
+    if (methodId === 'mpesa' && currency !== 'KES') {
+      return `MPESA only supports KES. Current currency: ${currency}`;
+    }
+    if (methodId === 'moyasar' && currency !== 'SAR') {
+      return `Moyasar only supports SAR. Current currency: ${currency}`;
+    }
+    if (methodId === 'stripe' && !isMethodAvailable('stripe')) {
+      return `Currency ${currency} is not supported by Stripe`;
+    }
+    if (methodId === 'paypal' && !isMethodAvailable('paypal')) {
+      return `Currency ${currency} may not be supported by PayPal`;
+    }
+    if (methodId === 'mercadopago' && !isMethodAvailable('mercadopago')) {
+      return `Currency ${currency} may not be supported by Mercado Pago`;
+    }
+    return null;
+  };
   return (
     <RadioGroup
       value={selectedMethod || undefined}
       onValueChange={onSelectMethod}
       className="space-y-3"
     >
-      {paymentMethods.map((method) => (
-        <div key={method.id} className="flex items-center space-x-2">
-          <Card className={`w-full cursor-pointer hover:border-primary transition-colors ${selectedMethod === method.id ? 'border-primary' : ''}`}>
-            <CardContent className="p-4">
-              <RadioGroupItem
-                value={method.id}
-                id={`payment-${method.id}`}
-                className="peer sr-only"
-              />
-              <Label
-                htmlFor={`payment-${method.id}`}
-                className="flex items-center justify-between cursor-pointer"
-              >
+      {paymentMethods.map((method) => {
+        const isAvailable = isMethodAvailable(method.id);
+        const unavailableReason = getUnavailableReason(method.id);
+        
+        return (
+        <TooltipProvider key={method.id}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex items-center space-x-2">
+                <Card className={`w-full transition-colors ${
+                  !isAvailable ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-primary'
+                } ${selectedMethod === method.id ? 'border-primary' : ''}`}>
+                  <CardContent className="p-4">
+                    <RadioGroupItem
+                      value={method.id}
+                      id={`payment-${method.id}`}
+                      className="peer sr-only"
+                      disabled={!isAvailable}
+                    />
+                    <Label
+                      htmlFor={`payment-${method.id}`}
+                      className={`flex items-center justify-between ${isAvailable ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                    >
                 <div className="flex items-center gap-4">
                   {method.id === 'stripe' && (
                     <div className="w-10 h-10 flex items-center justify-center">
@@ -65,24 +119,36 @@ export function PaymentMethodSelector({
                       <i className="ri-bank-line text-2xl text-green-600"></i>
                     </div>
                   )}
-                  <div>
-                    <div className="font-medium">{method.name}</div>
-                    <div className="text-sm text-muted-foreground">{method.description}</div>
-                    {method.testMode && (
-                      <div className="text-xs text-amber-600 mt-1">Test Mode Enabled</div>
-                    )}
-                  </div>
-                </div>
-                <div className="h-4 w-4 rounded-full border border-primary flex items-center justify-center">
-                  {selectedMethod === method.id && (
-                    <div className="h-2 w-2 rounded-full bg-primary btn-brand-primary "></div>
-                  )}
-                </div>
-              </Label>
-            </CardContent>
-          </Card>
-        </div>
-      ))}
+                      <div>
+                        <div className="font-medium">{method.name}</div>
+                        <div className="text-sm text-muted-foreground">{method.description}</div>
+                        {method.testMode && (
+                          <div className="text-xs text-amber-600 mt-1">Test Mode Enabled</div>
+                        )}
+                        {!isAvailable && (
+                          <div className="text-xs text-red-600 mt-1">Unavailable for {currency}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="h-4 w-4 rounded-full border border-primary flex items-center justify-center">
+                      {selectedMethod === method.id && (
+                        <div className="h-2 w-2 rounded-full bg-primary btn-brand-primary "></div>
+                      )}
+                    </div>
+                  </Label>
+                </CardContent>
+              </Card>
+            </div>
+            </TooltipTrigger>
+            {unavailableReason && (
+              <TooltipContent>
+                <p>{unavailableReason}</p>
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </TooltipProvider>
+      );
+      })}
     </RadioGroup>
   );
 }

@@ -44,7 +44,10 @@ export const PERMISSIONS = {
   CONFIGURE_CHANNELS: 'configure_channels',
 
   VIEW_PAGES: 'view_pages',
-  MANAGE_PAGES: 'manage_pages'
+  MANAGE_PAGES: 'manage_pages',
+
+  VIEW_TASKS: 'view_tasks',
+  MANAGE_TASKS: 'manage_tasks'
 } as const;
 
 export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -168,6 +171,10 @@ export const usePermissions = () => {
     ]);
   };
 
+  const canAccessTasks = (): boolean => {
+    return hasAnyPermission([PERMISSIONS.VIEW_TASKS, PERMISSIONS.MANAGE_TASKS]);
+  };
+
   return {
     permissions,
     isLoading,
@@ -189,6 +196,7 @@ export const usePermissions = () => {
     canAccessContacts,
     canAccessCalendar,
     canAccessCampaigns,
+    canAccessTasks,
     PERMISSIONS
   };
 };

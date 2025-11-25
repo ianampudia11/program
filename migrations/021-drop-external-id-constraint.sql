@@ -16,5 +16,5 @@ DROP INDEX IF EXISTS idx_messages_conversation_external_id;
 
 -- 🔧 RESULT
 -- Users can now send identical messages multiple times from WhatsApp mobile app
--- All messages will be preserved in the BotHive inbox
--- Only BotHive echo prevention remains (handled by in-memory tracking)
+-- All messages will be preserved in the PowerChat inbox
+-- Only PowerChat echo prevention remains (handled by in-memory tracking)

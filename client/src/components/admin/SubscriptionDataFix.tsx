@@ -123,7 +123,7 @@ export default function SubscriptionDataFix() {
         <Bug className="h-4 w-4" />
         <AlertTitle>Critical Bug Fix Available</AlertTitle>
         <AlertDescription>
-          This tool fixes the critical bug where existing BotHive deployments show incorrect renewal dialogs 
+          This tool fixes the critical bug where existing PowerChat deployments show incorrect renewal dialogs 
           for users with active subscriptions, while fresh installations work correctly. The issue is caused by 
           NULL values in subscription fields that were added in later migrations.
         </AlertDescription>
@@ -263,7 +263,7 @@ export default function SubscriptionDataFix() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           <p>
-            <strong>Problem:</strong> Existing BotHive deployments may have NULL values in subscription fields 
+            <strong>Problem:</strong> Existing PowerChat deployments may have NULL values in subscription fields 
             that were added in later migrations, causing incorrect renewal dialog behavior.
           </p>
           <p>

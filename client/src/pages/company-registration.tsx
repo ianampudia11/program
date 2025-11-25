@@ -6,6 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useTranslation } from '@/hooks/use-translation';
 import { useBranding } from '@/contexts/branding-context';
+import { useCurrency } from '@/contexts/currency-context';
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -65,6 +66,7 @@ export default function CompanyRegistrationPage() {
   const { toast } = useToast();
   const { t } = useTranslation();
   const { branding } = useBranding();
+  const { formatCurrency } = useCurrency();
   const [isSlugChecking, setIsSlugChecking] = useState(false);
   const [isSlugAvailable, setIsSlugAvailable] = useState<boolean | null>(null);
   const currentSlugRef = useRef<string>('');
@@ -670,7 +672,7 @@ export default function CompanyRegistrationPage() {
                                         )}
                                       </div>
                                       <span className="text-sm text-gray-500 ml-2">
-                                        ${plan.price}/month
+                                        {formatCurrency(plan.price)}/month
                                       </span>
                                     </div>
                                   </SelectItem>

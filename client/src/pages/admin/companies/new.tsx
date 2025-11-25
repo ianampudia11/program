@@ -29,6 +29,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useCurrency } from "@/contexts/currency-context";
 
 const companySchema = z.object({
   name: z.string().min(1, "Company name is required"),
@@ -46,6 +47,7 @@ export default function NewCompanyPage() {
   const { plans, isLoading: isLoadingPlans } = usePlans();
   const [_, navigate] = useLocation();
   const { toast } = useToast();
+  const { formatCurrency } = useCurrency();
 
   useEffect(() => {
     if (!isLoadingAuth && user && !user.isSuperAdmin) {
@@ -263,7 +265,7 @@ export default function NewCompanyPage() {
                             ) : (
                               plans.filter(plan => plan.isActive).map((plan) => (
                                 <SelectItem key={plan.id} value={plan.id.toString()}>
-                                  {plan.name} (${plan.price}/month)
+                                  {plan.name} ({formatCurrency(plan.price)}/month)
                                 </SelectItem>
                               ))
                             )}

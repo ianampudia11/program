@@ -50,6 +50,23 @@ export function isWebSocketAvailable(): boolean {
 }
 
 /**
+ * Broadcast an event to a specific WebChat widget session
+ * @param event - The event to broadcast
+ * @param sessionId - The visitor session ID
+ */
+export function broadcastToWebChatSession(event: WebSocketEvent, sessionId: string): void {
+  try {
+    if ((global as any).broadcastToWebChatWidget) {
+      (global as any).broadcastToWebChatWidget(event, sessionId);
+    } else {
+      
+    }
+  } catch (error) {
+    console.error('Error broadcasting to WebChat widget:', error);
+  }
+}
+
+/**
  * Campaign-specific event broadcasting
  */
 export class CampaignEventEmitter {
