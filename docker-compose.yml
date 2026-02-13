@@ -3,11 +3,11 @@ services:
   # PostgreSQL Database
   postgres:
     image: postgres:16
-    container_name: powerchat-postgres
+    container_name: iawarrior-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: root
-      POSTGRES_DB: powerchat
+      POSTGRES_DB: iawarrior
     ports:
       - "5433:5432"
     volumes:
@@ -18,24 +18,24 @@ services:
       timeout: 5s
       retries: 5
 
-  # PowerChat Application (Backend + Frontend)
+  # iawarrior Application (Backend + Frontend)
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: powerchat-app
+    container_name: iawarrior-app
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       - NODE_ENV=production
       - PORT=9000
-      - DATABASE_URL=postgresql://postgres:root@postgres:5432/powerchat
+      - DATABASE_URL=postgresql://postgres:root@postgres:5432/iawarrior
       - PGSSLMODE=disable
-      - SESSION_SECRET=powerchat-docker-secret
+      - SESSION_SECRET=iawarrior-docker-secret
       - FORCE_INSECURE_COOKIE=true
-      - ADMIN_EMAIL=admin@example.com
-      - ADMIN_PASSWORD=12345678
+      - ADMIN_EMAIL=admin@app.com
+      - ADMIN_PASSWORD=Admin@123456
       - BASE_URL=${BASE_URL:-http://localhost:9000}
       - DOCKER_CONTAINER=true
     ports:
@@ -46,16 +46,16 @@ services:
       - ./data:/app/data
       - ./migrations:/app/migrations
       # Auto-update volumes
-      - powerchat_updates:/app/volumes/updates
-      - powerchat_backups:/app/volumes/backups
-      - powerchat_app_updates:/app/volumes/app-updates
-      - powerchat_restart_signals:/app/volumes
+      - iawarrior_updates:/app/volumes/updates
+      - iawarrior_backups:/app/volumes/backups
+      - iawarrior_app_updates:/app/volumes/app-updates
+      - iawarrior_restart_signals:/app/volumes
     restart: unless-stopped
 
 volumes:
   postgres_data:
   # Auto-update persistent volumes
-  powerchat_updates:
-  powerchat_backups:
-  powerchat_app_updates:
-  powerchat_restart_signals:
+  iawarrior_updates:
+  iawarrior_backups:
+  iawarrior_app_updates:
+  iawarrior_restart_signals:

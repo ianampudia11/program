@@ -6,11 +6,22 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "strict": false
+    "strict": false,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./client/src/*"
+      ],
+      "@shared/*": [
+        "./shared/*"
+      ]
+    }
   },
   "tsx": {
     "watch": {
-      "include": ["server/**/*"],
+      "include": [
+        "server/**/*"
+      ],
       "exclude": [
         "node_modules/**/*",
         "dist/**/*",

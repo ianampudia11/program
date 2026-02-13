@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y lsb-release curl gnupg git \
 ENV PGUSER=postgres
 ENV PGPASSWORD=root
 ENV PGHOST=postgres
-ENV PGDATABASE=powerchat
+ENV PGDATABASE=iawarrior
 ENV APP_PORT=9000
 
 # Copy package files and install dependencies
@@ -42,12 +42,12 @@ RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && \
     chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Build arguments for instance customization
-ARG ADMIN_EMAIL="admin@powerchatapp.net"
-ARG COMPANY_NAME="PowerChat"
+ARG ADMIN_EMAIL="admin@app.com"
+ARG COMPANY_NAME="iawarrior"
 ARG INSTANCE_NAME="default"
 
-# Build the application
-RUN npm run build
+# Build the application - frontend with vite, backend with esbuild
+RUN npx vite build && node scripts/esbuild.config.js production
 
 # Perform string replacements in built files
 RUN find dist -type f \( -name "*.js" -o -name "*.html" -o -name "*.css" \) -exec sed -i "s/admin@powerchatapp\.net/${ADMIN_EMAIL}/g" {} \; && \

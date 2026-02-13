@@ -14,7 +14,7 @@ import { initPipelineStages } from "./init-pipeline-stages";
 
 declare global {
   namespace Express {
-    interface User extends SelectUser {}
+    interface User extends SelectUser { }
   }
 }
 
@@ -57,17 +57,18 @@ async function findCompanyAdmin(companyId: number): Promise<SelectUser | undefin
 async function createTemporaryAdmin(company: Company): Promise<SelectUser> {
   try {
 
-    const username = `admin@${company.slug}`;
+    const defaultUsername = `admin@${company.slug}`;
+    const defaultPassword = randomBytes(8).toString('hex');
 
+    const username = process.env.ADMIN_EMAIL || defaultUsername;
+    const password = process.env.ADMIN_PASSWORD || defaultPassword;
 
     const existingUser = await storage.getUserByUsernameCaseInsensitive(username);
     if (existingUser) {
       return existingUser;
     }
 
-
-    const password = randomBytes(8).toString('hex');
-
+    console.log(`Creating initial admin user: ${username}`);
 
     const adminUser = await storage.createUser({
       username,
@@ -970,16 +971,16 @@ export async function setupAuth(app: Express) {
 
 
   app.delete("/api/admin/companies/bulk", ensureSuperAdmin, async (req, res) => {
-    
+
     try {
-      
+
       const { companyIds } = req.body;
 
       if (!Array.isArray(companyIds) || companyIds.length === 0) {
         return res.status(400).json({ error: "Company IDs array is required" });
       }
 
-       
+
 
       const numericCompanyIds = companyIds.map(id => {
         if (typeof id === 'string') {
@@ -988,16 +989,16 @@ export async function setupAuth(app: Express) {
         }
         return typeof id === 'number' ? id : null;
       }).filter(id => id !== null) as number[];
-      
-      
+
+
       const validCompanyIds = numericCompanyIds.filter(id => id > 0);
-      
+
       if (validCompanyIds.length === 0) {
         return res.status(400).json({ error: "No valid company IDs provided" });
       }
-      
+
       if (validCompanyIds.length !== companyIds.length) {
-       
+
         return res.status(400).json({ error: "Some company IDs are invalid" });
       }
 
@@ -1006,7 +1007,7 @@ export async function setupAuth(app: Express) {
       const companies = await storage.getAllCompanies();
       const systemCompanies = companies.filter(c => c.slug === 'system');
       const systemCompanyIds = systemCompanies.map(c => c.id);
-      
+
       const hasSystemCompanies = validCompanyIds.some(id => systemCompanyIds.includes(id));
       if (hasSystemCompanies) {
         return res.status(400).json({ error: "Cannot delete system companies" });
@@ -1014,20 +1015,20 @@ export async function setupAuth(app: Express) {
 
 
       const { companyDeletionService } = await import('./services/company-deletion');
-      
+
 
       const deletionResults = [];
       for (const companyId of validCompanyIds) {
         try {
-          
+
 
           const company = await storage.getCompany(companyId);
           if (!company) {
             deletionResults.push({ companyId, success: false, error: `Company ${companyId} not found` });
             continue;
           }
-          
-          
+
+
           const result = await companyDeletionService.deleteCompany(companyId, (req as any).user.id);
           deletionResults.push({ companyId, success: true, result });
         } catch (error: unknown) {

@@ -1,0 +1,124 @@
+﻿
+  #13 DONE 0.2s
+  System.Management.Automation.RemoteException
+  #14 [ 9/12] RUN sed -i 's/\r$//' 
+/usr/local/bin/docker-entrypoint.sh &&     chmod +x 
+/usr/local/bin/docker-entrypoint.sh
+  #14 DONE 0.3s
+  System.Management.Automation.RemoteException
+> #15 [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production
+  #15 1.112 vite v5.4.21 building for production...
+  #15 1.183 transforming...
+  #15 31.92 Ô£ô 4597 modules transformed.
+  #15 36.83 rendering chunks...
+  #15 97.23 [plugin:vite:reporter] [plugin 
+vite:reporter] 
+  #15 98.46 (!) Some chunks are larger than 500 kB 
+after minification. Consider:
+  #15 98.46 - Using dynamic import() to code-split the 
+application
+  #15 98.46 - Use 
+build.rollupOptions.output.manualChunks to improve 
+chunking: https://rollupjs.org/configuration-options/#ou
+tput-manualchunks
+  #15 98.46 - Adjust chunk size limit for this warning 
+via build.chunkSizeWarningLimit.
+  #15 98.46 Ô£ô built in 1m 37s
+> #15 99.12 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mCould not 
+resolve "../../shared/utils/phone"[0m
+  #15 99.12 
+  #15 99.12     
+server/services/campaignQueueService.ts:28:37:
+  #15 99.12 [37m      28 Ôöé import { 
+normalizePhoneToE164 } from 
+[32m'../../shared/utils/phone'[37m;
+  #15 99.12          ÔòÁ                                
+      [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  #15 99.12 
+> #15 99.12 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mCould not 
+resolve "../../shared/utils/phone"[0m
+  #15 99.12 
+  #15 99.12     
+server/services/campaignService.ts:26:42:
+  #15 99.12 [37m      26 Ôöé import { 
+normalizePhoneForInternal } from 
+[32m'../../shared/utils/phone'[37m;
+  #15 99.12          ÔòÁ                                
+           [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  #15 99.12 
+> #15 99.22 2 errors
+> #15 99.23 ÔØî Build failed: Error: Build failed with 
+2 errors:
+> #15 99.23 
+server/services/campaignQueueService.ts:28:37: ERROR: 
+Could not resolve "../../shared/utils/phone"
+> #15 99.23 server/services/campaignService.ts:26:42: 
+ERROR: Could not resolve "../../shared/utils/phone"
+> #15 99.23     at failureErrorWithLog 
+(/app/node_modules/esbuild/lib/main.js:1467:15)
+> #15 99.23     at 
+/app/node_modules/esbuild/lib/main.js:926:25
+> #15 99.23     at 
+/app/node_modules/esbuild/lib/main.js:878:52
+> #15 99.23     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> #15 99.23     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> #15 99.23     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> #15 99.23     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> #15 99.23     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  #15 99.23     at Socket.emit (node:events:524:28)
+  #15 99.23     at addChunk 
+(node:internal/streams/readable:561:12) {
+> #15 99.23   errors: [Getter/Setter],
+  #15 99.23   warnings: [Getter/Setter]
+  #15 99.23 }
+> #15 ERROR: process "/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  ------
+>  > [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production:
+> 99.23     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> 99.23     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> 99.23     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> 99.23     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> 99.23     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  99.23     at Socket.emit (node:events:524:28)
+  99.23     at addChunk 
+(node:internal/streams/readable:561:12) {
+> 99.23   errors: [Getter/Setter],
+  99.23   warnings: [Getter/Setter]
+  99.23 }
+  ------
+  Dockerfile:50
+  --------------------
+    48 |     
+>   49 |     # Build the application - frontend with 
+vite, backend with esbuild
+>   50 | >>> RUN npx vite build && node 
+scripts/esbuild.config.js production
+    51 |     
+    52 |     # Perform string replacements in built 
+files
+  --------------------
+> ERROR: failed to build: failed to solve: process 
+"/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  System.Management.Automation.RemoteException
+  View build details: docker-desktop://dashboard/build/d
+esktop-linux/desktop-linux/vztibnx4qbxmv1p5xt1c3lhl5
+
+

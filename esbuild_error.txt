@@ -1,0 +1,116 @@
+﻿
+  #13 DONE 0.3s
+  System.Management.Automation.RemoteException
+  #14 [10/12] RUN npm run build:production
+  #14 0.389 
+  #14 0.389 > iawarrior-tech@2.0.0 build:production
+> #14 0.389 > cross-env NODE_ENV=production vite build 
+&& node scripts/esbuild.config.js production
+  #14 0.389 
+  #14 0.649 vite v5.4.21 building for production...
+  #14 0.702 transforming...
+  #14 22.38 Ô£ô 4580 modules transformed.
+  #14 24.82 rendering chunks...
+  #14 60.46 (!) Some chunks are larger than 500 kB 
+after minification. Consider:
+  #14 60.46 - Using dynamic import() to code-split the 
+application
+  #14 60.46 - Use 
+build.rollupOptions.output.manualChunks to improve 
+chunking: https://rollupjs.org/configuration-options/#ou
+tput-manualchunks
+  #14 60.46 - Adjust chunk size limit for this warning 
+via build.chunkSizeWarningLimit.
+  #14 60.46 Ô£ô built in 59.78s
+> #14 61.43 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mCould not 
+resolve "../../shared/utils/phone"[0m
+  #14 61.43 
+  #14 61.43     
+server/services/campaignQueueService.ts:28:37:
+  #14 61.43 [37m      28 Ôöé import { 
+normalizePhoneToE164 } from 
+[32m'../../shared/utils/phone'[37m;
+  #14 61.43          ÔòÁ                                
+      [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  #14 61.43 
+> #14 61.44 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mCould not 
+resolve "../../shared/utils/phone"[0m
+  #14 61.44 
+  #14 61.44     
+server/services/campaignService.ts:26:42:
+  #14 61.44 [37m      26 Ôöé import { 
+normalizePhoneForInternal } from 
+[32m'../../shared/utils/phone'[37m;
+  #14 61.44          ÔòÁ                                
+           [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+  #14 61.44 
+> #14 61.56 2 errors
+> #14 61.56 ÔØî Build failed: Error: Build failed with 
+2 errors:
+> #14 61.56 
+server/services/campaignQueueService.ts:28:37: ERROR: 
+Could not resolve "../../shared/utils/phone"
+> #14 61.56 server/services/campaignService.ts:26:42: 
+ERROR: Could not resolve "../../shared/utils/phone"
+> #14 61.56     at failureErrorWithLog 
+(/app/node_modules/esbuild/lib/main.js:1467:15)
+> #14 61.56     at 
+/app/node_modules/esbuild/lib/main.js:926:25
+> #14 61.56     at 
+/app/node_modules/esbuild/lib/main.js:878:52
+> #14 61.56     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> #14 61.56     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> #14 61.56     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> #14 61.56     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> #14 61.56     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  #14 61.56     at Socket.emit (node:events:524:28)
+  #14 61.56     at addChunk 
+(node:internal/streams/readable:561:12) {
+> #14 61.56   errors: [Getter/Setter],
+  #14 61.56   warnings: [Getter/Setter]
+  #14 61.56 }
+> #14 ERROR: process "/bin/sh -c npm run 
+build:production" did not complete successfully: exit 
+code: 1
+  ------
+   > [10/12] RUN npm run build:production:
+> 61.56     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> 61.56     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> 61.56     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> 61.56     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> 61.56     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  61.56     at Socket.emit (node:events:524:28)
+  61.56     at addChunk 
+(node:internal/streams/readable:561:12) {
+> 61.56   errors: [Getter/Setter],
+  61.56   warnings: [Getter/Setter]
+  61.56 }
+  ------
+  Dockerfile:50
+  --------------------
+    49 |     # Build the application
+    50 | >>> RUN npm run build:production
+    51 |     
+    52 |     # Perform string replacements in built 
+files
+  --------------------
+> ERROR: failed to build: failed to solve: process 
+"/bin/sh -c npm run build:production" did not complete 
+successfully: exit code: 1
+  System.Management.Automation.RemoteException
+  View build details: docker-desktop://dashboard/build/d
+esktop-linux/desktop-linux/td8nb5dsqmvav9ub1rtz539zb
+
+

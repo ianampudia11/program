@@ -1,0 +1,157 @@
+﻿docker : #0 building with "desktop-linux" instance using 
+docker driver
+En línea: 1 Carácter: 1
++ docker build --progress=plain -f Dockerfile . 2>&1 | 
+Out-File -FilePa ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (#0 building  
+   wit...g docker driver:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.88kB 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for 
+docker.io/library/node:20-slim
+#2 DONE 0.5s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 85B done
+#3 DONE 0.0s
+
+#4 [ 1/12] FROM docker.io/library/node:20-slim@sha256:c658
+5df72c34172bebd8d36abed961e231d7d3b5cee2e01294c4495e8a03f6
+87
+#4 resolve docker.io/library/node:20-slim@sha256:c6585df72
+c34172bebd8d36abed961e231d7d3b5cee2e01294c4495e8a03f687 
+0.0s done
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 4.90MB 5.0s
+#5 transferring context: 8.29MB 9.0s done
+#5 DONE 9.1s
+
+#6 [ 2/12] WORKDIR /app
+#6 CACHED
+
+#7 [ 3/12] RUN apt-get update && apt-get install -y 
+lsb-release curl gnupg git     && curl -sSL 
+https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg 
+--dearmor | tee 
+/etc/apt/trusted.gpg.d/apt.postgresql.org.gpg > /dev/null 
+    && echo "deb http://apt.postgresql.org/pub/repos/apt/ 
+$(lsb_release -cs)-pgdg main" | tee 
+/etc/apt/sources.list.d/pgdg.list     && apt-get update   
+  && apt-get install -y postgresql-client-16     && rm 
+-rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [ 4/12] COPY package*.json ./
+#8 CACHED
+
+#9 [ 5/12] RUN npm ci --include=optional
+#9 CACHED
+
+#10 [ 6/12] COPY . .
+#10 DONE 19.1s
+
+#11 [ 7/12] RUN npm install @rollup/rollup-linux-x64-gnu 
+--save-optional
+#11 81.36 
+#11 81.36 changed 1 package, and audited 1351 packages in 
+1m
+#11 81.36 
+#11 81.36 270 packages are looking for funding
+#11 81.36   run `npm fund` for details
+#11 81.40 
+#11 81.40 10 vulnerabilities (5 moderate, 5 high)
+#11 81.40 
+#11 81.40 To address all issues possible (including 
+breaking changes), run:
+#11 81.40   npm audit fix --force
+#11 81.40 
+#11 81.40 Some issues need review, and may require 
+choosing
+#11 81.40 a different dependency.
+#11 81.40 
+#11 81.40 Run `npm audit` for details.
+#11 DONE 82.8s
+
+#12 [ 8/12] COPY docker-entrypoint-simple.sh 
+/usr/local/bin/docker-entrypoint.sh
+#12 DONE 0.2s
+
+#13 [ 9/12] RUN sed -i 's/\r$//' 
+/usr/local/bin/docker-entrypoint.sh &&     chmod +x 
+/usr/local/bin/docker-entrypoint.sh
+#13 DONE 0.4s
+
+#14 [10/12] RUN npm run build:production
+#14 0.914 
+#14 0.914 > iawarrior-tech@2.0.0 build:production
+#14 0.914 > cross-env NODE_ENV=production vite build && 
+node scripts/esbuild.config.js production
+#14 0.914 
+#14 1.554 vite v5.4.21 building for production...
+#14 1.694 transforming...
+#14 15.31 Ô£ô 4395 modules transformed.
+#14 15.32 x Build failed in 13.69s
+#14 15.32 error during build:
+#14 15.32 [vite:load-fallback] Could not load 
+/app/shared/pipeline-templates (imported by 
+client/src/config/pipeline-templates.ts): ENOENT: no such 
+file or directory, open '/app/shared/pipeline-templates'
+#14 15.32     at async open 
+(node:internal/fs/promises:634:25)
+#14 15.32     at async Object.readFile 
+(node:internal/fs/promises:1236:14)
+#14 15.32     at async Object.load (file:///app/node_modul
+es/vite/dist/node/chunks/dep-BK3b2jBa.js:65357:25)
+#14 15.32     at async PluginDriver.hookFirstAndGetPlugin 
+(file:///app/node_modules/rollup/dist/es/shared/node-entry
+.js:22430:28)
+#14 15.32     at async file:///app/node_modules/rollup/dis
+t/es/shared/node-entry.js:21422:33
+#14 15.32     at async Queue.work (file:///app/node_module
+s/rollup/dist/es/shared/node-entry.js:22658:32)
+#14 ERROR: process "/bin/sh -c npm run build:production" 
+did not complete successfully: exit code: 1
+------
+ > [10/12] RUN npm run build:production:
+15.31 Ô£ô 4395 modules transformed.
+15.32 x Build failed in 13.69s
+15.32 error during build:
+15.32 [vite:load-fallback] Could not load 
+/app/shared/pipeline-templates (imported by 
+client/src/config/pipeline-templates.ts): ENOENT: no such 
+file or directory, open '/app/shared/pipeline-templates'
+15.32     at async open (node:internal/fs/promises:634:25)
+15.32     at async Object.readFile 
+(node:internal/fs/promises:1236:14)
+15.32     at async Object.load (file:///app/node_modules/v
+ite/dist/node/chunks/dep-BK3b2jBa.js:65357:25)
+15.32     at async PluginDriver.hookFirstAndGetPlugin (fil
+e:///app/node_modules/rollup/dist/es/shared/node-entry.js:
+22430:28)
+15.32     at async file:///app/node_modules/rollup/dist/es
+/shared/node-entry.js:21422:33
+15.32     at async Queue.work (file:///app/node_modules/ro
+llup/dist/es/shared/node-entry.js:22658:32)
+------
+Dockerfile:50
+--------------------
+  48 |     
+  49 |     # Build the application
+  50 | >>> RUN npm run build:production
+  51 |     
+  52 |     # Perform string replacements in built files
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh 
+-c npm run build:production" did not complete 
+successfully: exit code: 1
+
+View build details: docker-desktop://dashboard/build/deskt
+op-linux/desktop-linux/tvezhjpz5yrk3r621u5qavgtz

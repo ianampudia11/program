@@ -1,0 +1,33 @@
+# Development Dockerfile for iawarrior (no build required)
+FROM node:20-slim
+
+# Install essential packages
+RUN apt-get update && \
+    apt-get install -y \
+    postgresql-client-16 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Environment variables
+ENV PGUSER=postgres
+ENV PGPASSWORD=root
+ENV PGHOST=postgres
+ENV PGDATABASE=iawarrior
+ENV APP_PORT=9000
+ENV NODE_ENV=development
+
+# Copy package files and install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy the rest of the application
+COPY . .
+
+# Expose port
+EXPOSE 9000
+
+# Start the application in development mode
+CMD ["npx", "vite-node", "server/index.ts"]

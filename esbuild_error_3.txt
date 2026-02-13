@@ -1,0 +1,116 @@
+﻿
+> #15 83.33 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"pipelineStageReverts"[0m
+  #15 83.33 
+  #15 83.33     server/storage.ts:34:2:
+  #15 83.33 [37m      34 Ôöé   
+[32mpipelineStageReverts[37m, type 
+PipelineStageRevert, type InsertPipel...
+  #15 83.33          ÔòÁ   [32m~~~~~~~~~~~~~~~~~~~~[0m
+  #15 83.33 
+> #15 83.33 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"pipelineStageRevertLogs"[0m
+  #15 83.33 
+  #15 83.33     server/storage.ts:35:2:
+  #15 83.33 [37m      35 Ôöé   
+[32mpipelineStageRevertLogs[37m, type 
+PipelineStageRevertLog, type Inser...
+  #15 83.33          ÔòÁ   
+[32m~~~~~~~~~~~~~~~~~~~~~~~[0m
+  #15 83.33 
+> #15 83.33 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"companyCustomFields"[0m
+  #15 83.33 
+  #15 83.33     server/storage.ts:45:2:
+  #15 83.33 [37m      45 Ôöé   
+[32mcompanyCustomFields[37m,
+  #15 83.33          ÔòÁ   [32m~~~~~~~~~~~~~~~~~~~[0m
+  #15 83.33 
+> #15 83.33 6 errors
+> #15 83.34 ÔØî Build failed: Error: Build failed with 
+6 errors:
+> #15 83.34 server/storage.ts:21:2: ERROR: No matching 
+export in "shared/schema.ts" for import "apiWebhooks"
+> #15 83.34 server/storage.ts:28:2: ERROR: No matching 
+export in "shared/schema.ts" for import 
+"calendarBookings"
+> #15 83.34 server/storage.ts:32:2: ERROR: No matching 
+export in "shared/schema.ts" for import "pipelines"
+> #15 83.34 server/storage.ts:34:2: ERROR: No matching 
+export in "shared/schema.ts" for import 
+"pipelineStageReverts"
+> #15 83.34 server/storage.ts:35:2: ERROR: No matching 
+export in "shared/schema.ts" for import 
+"pipelineStageRevertLogs"
+  #15 83.34 ...
+> #15 83.34     at failureErrorWithLog 
+(/app/node_modules/esbuild/lib/main.js:1467:15)
+> #15 83.34     at 
+/app/node_modules/esbuild/lib/main.js:926:25
+> #15 83.34     at 
+/app/node_modules/esbuild/lib/main.js:878:52
+> #15 83.34     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> #15 83.34     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> #15 83.34     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> #15 83.34     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> #15 83.34     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  #15 83.34     at Socket.emit (node:events:524:28)
+  #15 83.34     at addChunk 
+(node:internal/streams/readable:561:12) {
+> #15 83.34   errors: [Getter/Setter],
+  #15 83.34   warnings: [Getter/Setter]
+  #15 83.34 }
+> #15 ERROR: process "/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  ------
+>  > [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production:
+> 83.34     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> 83.34     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> 83.34     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> 83.34     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> 83.34     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  83.34     at Socket.emit (node:events:524:28)
+  83.34     at addChunk 
+(node:internal/streams/readable:561:12) {
+> 83.34   errors: [Getter/Setter],
+  83.34   warnings: [Getter/Setter]
+  83.34 }
+  ------
+  Dockerfile:50
+  --------------------
+    48 |     
+>   49 |     # Build the application - frontend with 
+vite, backend with esbuild
+>   50 | >>> RUN npx vite build && node 
+scripts/esbuild.config.js production
+    51 |     
+    52 |     # Perform string replacements in built 
+files
+  --------------------
+> ERROR: failed to build: failed to solve: process 
+"/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  System.Management.Automation.RemoteException
+  View build details: docker-desktop://dashboard/build/d
+esktop-linux/desktop-linux/65y3zwm3yykpe4p2bexbzfdcj
+
+

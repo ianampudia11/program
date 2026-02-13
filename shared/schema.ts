@@ -3205,7 +3205,7 @@ export const whatsappAccountLogs = pgTable("whatsapp_account_logs", {
 
 export const scheduledMessageStatusEnum = pgEnum('scheduled_message_status', [
   'pending',
-  'scheduled', 
+  'scheduled',
   'processing',
   'sent',
   'failed',
@@ -3219,7 +3219,7 @@ export const scheduledMessages = pgTable("scheduled_messages", {
   conversationId: integer("conversation_id").notNull(),
   channelId: integer("channel_id").notNull(),
   channelType: text("channel_type").notNull(), // 'whatsapp', 'instagram', 'messenger', 'email', etc.
-  
+
 
   content: text("content").notNull(),
   messageType: text("message_type").notNull().default('text'), // 'text', 'media', 'template', etc.
@@ -3227,11 +3227,11 @@ export const scheduledMessages = pgTable("scheduled_messages", {
   mediaFilePath: text("media_file_path"), // Local file path for scheduled media
   mediaType: text("media_type"), // 'image', 'video', 'audio', 'document'
   caption: text("caption"),
-  
+
 
   scheduledFor: timestamp("scheduled_for").notNull(),
   timezone: text("timezone").default('UTC'),
-  
+
 
   status: scheduledMessageStatusEnum("status").default('pending'),
   attempts: integer("attempts").default(0),
@@ -3240,7 +3240,7 @@ export const scheduledMessages = pgTable("scheduled_messages", {
   sentAt: timestamp("sent_at"),
   failedAt: timestamp("failed_at"),
   errorMessage: text("error_message"),
-  
+
 
   metadata: jsonb("metadata").default('{}'), // Additional data like quick replies, templates, etc.
   createdBy: integer("created_by").notNull(), // User who scheduled the message
@@ -4272,3 +4272,130 @@ export type InsertKnowledgeBaseDocumentNode = z.infer<typeof insertKnowledgeBase
 
 export type KnowledgeBaseUsage = typeof knowledgeBaseUsage.$inferSelect;
 export type InsertKnowledgeBaseUsage = z.infer<typeof insertKnowledgeBaseUsageSchema>;
+
+// Pipeline Stage Reverts
+export const pipelineStageReverts = pgTable("pipeline_stage_reverts", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  dealId: integer("deal_id").notNull().references(() => deals.id, { onDelete: 'cascade' }),
+  fromStageId: integer("from_stage_id").notNull().references(() => pipelineStages.id),
+  toStageId: integer("to_stage_id").references(() => pipelineStages.id),
+  scheduledFor: timestamp("scheduled_for").notNull(),
+  status: text("status", { enum: ['pending', 'executed', 'cancelled', 'failed', 'skipped'] }).notNull().default('pending'),
+  executedAt: timestamp("executed_at"),
+  errorMessage: text("error_message"),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+
+export const insertPipelineStageRevertSchema = createInsertSchema(pipelineStageReverts).pick({
+  companyId: true,
+  dealId: true,
+  fromStageId: true,
+  toStageId: true,
+  scheduledFor: true,
+  status: true,
+  metadata: true
+});
+
+export type PipelineStageRevert = typeof pipelineStageReverts.$inferSelect;
+export type InsertPipelineStageRevert = z.infer<typeof insertPipelineStageRevertSchema>;
+
+export const pipelineStageRevertLogs = pgTable("pipeline_stage_revert_logs", {
+  id: serial("id").primaryKey(),
+  revertId: integer("revert_id").references(() => pipelineStageReverts.id, { onDelete: 'cascade' }),
+  status: text("status").notNull(),
+  message: text("message"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").notNull().defaultNow()
+});
+
+export const insertPipelineStageRevertLogSchema = createInsertSchema(pipelineStageRevertLogs).pick({
+  revertId: true,
+  status: true,
+  message: true,
+  metadata: true
+});
+
+export type PipelineStageRevertLog = typeof pipelineStageRevertLogs.$inferSelect;
+export type InsertPipelineStageRevertLog = z.infer<typeof insertPipelineStageRevertLogSchema>;
+
+// API Tables
+// apiKeys, apiRateLimits, and apiUsage are already defined elsewhere in this file
+
+export const apiWebhooks = pgTable("api_webhooks", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  url: text("url").notNull(),
+  events: text("events").array(),
+  isActive: boolean("is_active").default(true),
+  secret: text("secret"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+export const insertApiWebhookSchema = createInsertSchema(apiWebhooks);
+export type ApiWebhook = typeof apiWebhooks.$inferSelect;
+export type InsertApiWebhook = z.infer<typeof insertApiWebhookSchema>;
+
+// apiUsage removed
+
+
+// Calendar Integration Tables
+// googleCalendarTokens, zohoCalendarTokens, calendlyCalendarTokens are already defined elsewhere in this file
+export const calendarBookings = pgTable("calendar_bookings", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  contactId: integer("contact_id").references(() => contacts.id, { onDelete: 'cascade' }),
+  userId: integer("user_id").references(() => users.id, { onDelete: 'set null' }),
+  calendarProvider: text("calendar_provider").notNull(),
+  externalEventId: text("external_event_id"),
+  title: text("title").notNull(),
+  description: text("description"),
+  startTime: timestamp("start_time").notNull(),
+  endTime: timestamp("end_time").notNull(),
+  status: text("status").default('confirmed'),
+  meetingUrl: text("meeting_url"),
+  location: text("location"),
+  metadata: jsonb("metadata").default({}),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+export const insertCalendarBookingSchema = createInsertSchema(calendarBookings);
+export type CalendarBooking = typeof calendarBookings.$inferSelect;
+export type InsertCalendarBooking = z.infer<typeof insertCalendarBookingSchema>;
+
+
+
+
+
+// Pipelines
+export const pipelines = pgTable("pipelines", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  name: text("name").notNull(),
+  description: text("description"),
+  isDefault: boolean("is_default").default(false),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});
+export const insertPipelineSchema = createInsertSchema(pipelines);
+export type Pipeline = typeof pipelines.$inferSelect;
+export type InsertPipeline = z.infer<typeof insertPipelineSchema>;
+
+// pipelineStages removed (duplicate)
+
+
+export const companyCustomFields = pgTable("company_custom_fields", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull().references(() => companies.id, { onDelete: 'cascade' }),
+  entityType: text("entity_type").notNull(), // contact, deal, etc.
+  name: text("name").notNull(),
+  key: text("key").notNull(),
+  fieldType: text("field_type").notNull(), // text, number, select, etc.
+  options: jsonb("options"), // for select types
+  isRequired: boolean("is_required").default(false),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow()
+});

@@ -1,0 +1,98 @@
+﻿
+  #13 DONE 0.2s
+  System.Management.Automation.RemoteException
+  #14 [ 9/12] RUN sed -i 's/\r$//' 
+/usr/local/bin/docker-entrypoint.sh &&     chmod +x 
+/usr/local/bin/docker-entrypoint.sh
+  #14 DONE 0.3s
+  System.Management.Automation.RemoteException
+> #15 [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production
+  #15 1.059 vite v5.4.21 building for production...
+  #15 1.145 transforming...
+  #15 12.43 Ô£ô 2947 modules transformed.
+  #15 12.43 x Build failed in 11.33s
+> #15 12.43 error during build:
+> #15 12.43 [vite:esbuild] Transform failed with 1 
+error:
+> #15 12.43 /app/shared/schema.ts:4302:62: ERROR: 
+Expected identifier but found ";"
+  #15 12.43 file: /app/shared/schema.ts:4302:62
+  #15 12.43 
+  #15 12.43 Expected identifier but found ";"
+  #15 12.43 4300|  });
+  #15 12.43 4301|  
+  #15 12.43 4302|  export type PipelineStageRevert = 
+typeof pipelineStageReverts.;
+  #15 12.43    |                                        
+                        ^
+  #15 12.43 4303|  export type 
+InsertPipelineStageRevert = z.infer<typeof 
+insertPipelineStageRevertSchema>;
+  #15 12.43 4304|  
+  #15 12.43 
+> #15 12.43     at failureErrorWithLog (/app/node_module
+s/vite/node_modules/esbuild/lib/main.js:1472:15)
+> #15 12.43     at /app/node_modules/vite/node_modules/e
+sbuild/lib/main.js:755:50
+> #15 12.43     at responseCallbacks.<computed> (/app/no
+de_modules/vite/node_modules/esbuild/lib/main.js:622:9)
+> #15 12.43     at handleIncomingPacket (/app/node_modul
+es/vite/node_modules/esbuild/lib/main.js:677:12)
+> #15 12.43     at Socket.readFromStdout (/app/node_modu
+les/vite/node_modules/esbuild/lib/main.js:600:7)
+  #15 12.43     at Socket.emit (node:events:524:28)
+  #15 12.43     at addChunk 
+(node:internal/streams/readable:561:12)
+  #15 12.43     at readableAddChunkPushByteMode 
+(node:internal/streams/readable:512:3)
+  #15 12.43     at Readable.push 
+(node:internal/streams/readable:392:5)
+  #15 12.43     at Pipe.onStreamRead 
+(node:internal/stream_base_commons:191:23)
+> #15 ERROR: process "/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  ------
+>  > [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production:
+> 12.43     at failureErrorWithLog (/app/node_modules/vi
+te/node_modules/esbuild/lib/main.js:1472:15)
+> 12.43     at /app/node_modules/vite/node_modules/esbui
+ld/lib/main.js:755:50
+> 12.43     at responseCallbacks.<computed> (/app/node_m
+odules/vite/node_modules/esbuild/lib/main.js:622:9)
+> 12.43     at handleIncomingPacket (/app/node_modules/v
+ite/node_modules/esbuild/lib/main.js:677:12)
+> 12.43     at Socket.readFromStdout (/app/node_modules/
+vite/node_modules/esbuild/lib/main.js:600:7)
+  12.43     at Socket.emit (node:events:524:28)
+  12.43     at addChunk 
+(node:internal/streams/readable:561:12)
+  12.43     at readableAddChunkPushByteMode 
+(node:internal/streams/readable:512:3)
+  12.43     at Readable.push 
+(node:internal/streams/readable:392:5)
+  12.43     at Pipe.onStreamRead 
+(node:internal/stream_base_commons:191:23)
+  ------
+  Dockerfile:50
+  --------------------
+    48 |     
+>   49 |     # Build the application - frontend with 
+vite, backend with esbuild
+>   50 | >>> RUN npx vite build && node 
+scripts/esbuild.config.js production
+    51 |     
+    52 |     # Perform string replacements in built 
+files
+  --------------------
+> ERROR: failed to build: failed to solve: process 
+"/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  System.Management.Automation.RemoteException
+  View build details: docker-desktop://dashboard/build/d
+esktop-linux/desktop-linux/nehp3av08xnammvbv4y1kpjme
+
+

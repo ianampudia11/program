@@ -1,0 +1,128 @@
+﻿
+  #14 76.95 ../dist/public/assets/index-DumwgzJy.js     
+               160.94 kB Ôöé gzip:    22.28 kB
+  #14 76.95 ../dist/public/assets/index-BlWNm2wq.js     
+               513.09 kB Ôöé gzip:    64.39 kB
+  #14 76.95 ../dist/public/assets/editor-BPJw1IMA.js    
+             1,116.04 kB Ôöé gzip:   291.50 kB
+  #14 76.95 ../dist/public/assets/index-C8uuC7GT.js     
+             7,456.48 kB Ôöé gzip: 1,365.64 kB
+  #14 76.95 Ô£ô built in 1m 16s
+> #14 77.80 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"apiWebhooks"[0m
+  #14 77.80 
+  #14 77.80     server/storage.ts:21:2:
+  #14 77.80 [37m      21 Ôöé   [32mapiWebhooks[37m, 
+type ApiWebhook, type InsertApiWebhook,
+  #14 77.80          ÔòÁ   [32m~~~~~~~~~~~[0m
+  #14 77.80 
+> #14 77.80 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"calendarBookings"[0m
+  #14 77.80 
+  #14 77.80     server/storage.ts:28:2:
+  #14 77.80 [37m      28 Ôöé   
+[32mcalendarBookings[37m, type CalendarBooking, type 
+InsertCalendarBooking,
+  #14 77.80          ÔòÁ   [32m~~~~~~~~~~~~~~~~[0m
+  #14 77.80 
+> #14 77.80 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import "pipelines"[0m
+  #14 77.80 
+  #14 77.80     server/storage.ts:32:2:
+  #14 77.80 [37m      32 Ôöé   [32mpipelines[37m, 
+type Pipeline, type InsertPipeline,
+  #14 77.80          ÔòÁ   [32m~~~~~~~~~[0m
+  #14 77.80 
+> #14 77.80 [31mÔ£ÿ 
+[41;31m[[41;97mERROR[41;31m][0m [1mNo matching 
+export in "shared/schema.ts" for import 
+"companyCustomFields"[0m
+  #14 77.80 
+  #14 77.80     server/storage.ts:45:2:
+  #14 77.80 [37m      45 Ôöé   
+[32mcompanyCustomFields[37m,
+  #14 77.80          ÔòÁ   [32m~~~~~~~~~~~~~~~~~~~[0m
+  #14 77.80 
+> #14 77.80 4 errors
+> #14 77.81 ÔØî Build failed: Error: Build failed with 
+4 errors:
+> #14 77.81 server/storage.ts:21:2: ERROR: No matching 
+export in "shared/schema.ts" for import "apiWebhooks"
+> #14 77.81 server/storage.ts:28:2: ERROR: No matching 
+export in "shared/schema.ts" for import 
+"calendarBookings"
+> #14 77.81 server/storage.ts:32:2: ERROR: No matching 
+export in "shared/schema.ts" for import "pipelines"
+> #14 77.81 server/storage.ts:45:2: ERROR: No matching 
+export in "shared/schema.ts" for import 
+"companyCustomFields"
+> #14 77.81     at failureErrorWithLog 
+(/app/node_modules/esbuild/lib/main.js:1467:15)
+> #14 77.81     at 
+/app/node_modules/esbuild/lib/main.js:926:25
+> #14 77.81     at 
+/app/node_modules/esbuild/lib/main.js:878:52
+> #14 77.81     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> #14 77.81     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> #14 77.81     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> #14 77.81     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> #14 77.81     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  #14 77.81     at Socket.emit (node:events:524:28)
+  #14 77.81     at addChunk 
+(node:internal/streams/readable:561:12) {
+> #14 77.81   errors: [Getter/Setter],
+  #14 77.81   warnings: [Getter/Setter]
+  #14 77.81 }
+> #14 ERROR: process "/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  ------
+>  > [10/12] RUN npx vite build && node 
+scripts/esbuild.config.js production:
+> 77.81     at buildResponseToResult 
+(/app/node_modules/esbuild/lib/main.js:924:7)
+> 77.81     at 
+/app/node_modules/esbuild/lib/main.js:951:16
+> 77.81     at responseCallbacks.<computed> 
+(/app/node_modules/esbuild/lib/main.js:603:9)
+> 77.81     at handleIncomingPacket 
+(/app/node_modules/esbuild/lib/main.js:658:12)
+> 77.81     at Socket.readFromStdout 
+(/app/node_modules/esbuild/lib/main.js:581:7)
+  77.81     at Socket.emit (node:events:524:28)
+  77.81     at addChunk 
+(node:internal/streams/readable:561:12) {
+> 77.81   errors: [Getter/Setter],
+  77.81   warnings: [Getter/Setter]
+  77.81 }
+  ------
+  Dockerfile:50
+  --------------------
+    48 |     
+>   49 |     # Build the application - frontend with 
+vite, backend with esbuild
+>   50 | >>> RUN npx vite build && node 
+scripts/esbuild.config.js production
+    51 |     
+    52 |     # Perform string replacements in built 
+files
+  --------------------
+> ERROR: failed to build: failed to solve: process 
+"/bin/sh -c npx vite build && node 
+scripts/esbuild.config.js production" did not complete 
+successfully: exit code: 1
+  System.Management.Automation.RemoteException
+  View build details: docker-desktop://dashboard/build/d
+esktop-linux/desktop-linux/mbmw621yovoo2zuvbqrrj85ww
+
+
