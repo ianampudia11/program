@@ -29,6 +29,7 @@
     "db:migrate:status": "node scripts/migrate.js status",
     "db:migrate:validate": "node scripts/migrate.js validate",
     "db:migrate:create": "node scripts/migrate.js create",
+    "db:reset-admin": "npx tsx scripts/reset-admin-password.ts",
     "test:fixes": "node test-all-fixes.js",
     "test:migration": "node test-migration-system.js",
     "verify:fixes": "node verify-fixes.js"
